@@ -1,0 +1,13 @@
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+httpx==0.27.0
+google-cloud-firestore==2.16.0
+google-cloud-aiplatform[preview]==1.71.1
+vertexai==1.71.1
+
+# Semantic RAG cache (in-memory, no Redis)
+sentence-transformers>=3.0.0
+numpy>=1.26.0
+
+# Post-Validation Quality Audit
+gspread>=6.0.0

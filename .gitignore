@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Credentials and secrets
+secrets.json
+
+# macOS
+.DS_Store
+
+# Logs
+rewrite_test.log
+
