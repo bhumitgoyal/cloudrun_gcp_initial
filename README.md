@@ -232,8 +232,9 @@ Intercepts after query rewriting, before Vertex AI RAG retrieval. Caches respons
 - **System Prompt** — a detailed, production-grade prompt baked into the module as `SYSTEM_PROMPT`. Includes:
   - Role & identity (GoHappy Club support agent)
   - Full company context (plans, pricing, policies, contact info)
-  - Structured response instructions (understand → evaluate → answer/escalate)
+  - Structured response instructions (understand → evaluate → answer / reject / escalate)
   - Tone rules (warm, concise, English-only, no filler, max 1 emoji)
+  - Strict Guardrails & Anti-Hallucination (SILENT REJECT on trivia, ESCALATE gracefully if answers are missing without making things up)
   - Strict JSON output schema: `{"answer": "...", "escalation": true/false}`
 
 - **Output Parsing** — enforces JSON output via Gemini's `response_mime_type="application/json"` and a response schema. Falls back to best-effort text extraction if parsing fails.
@@ -464,9 +465,15 @@ WHATSAPP_VERIFY_TOKEN=WHATSAPP_VERIFY_TOKEN:latest" \
 
 ---
 
-## Escalation Flow
+## Escalation & Rejection Flow
 
-When the bot detects it cannot answer accurately or the user needs human help:
+When the bot processes a message, it enforces strict guardrails to prevent hallucinations and spam:
+
+### 1. Out-of-Context Responses (Rejections)
+If the user asks random trivia (e.g. "what are the top 10 schools in India?") or for medical/financial advice, the bot **rejects** the message. It politely states it can only help with GoHappy Club and explicitly **avoids** alerting humans (escalation: false).
+
+### 2. Standard Escalations (Missing context or account issues)
+When the query *is* related to GoHappy Club, but the bot cannot answer accurately (e.g. missing policies), or the user asks for a human:
 
 ```
 1. Gemini returns { "escalation": true }
@@ -578,6 +585,8 @@ python Test/test_full_simulation.py
 9. **English-only replies** — the bot understands messages in any language (Hindi, Hinglish, Tamil, etc.) but always replies in simple, clear English to maintain consistency.
 
 10. **Pre-downloaded model** — the `all-MiniLM-L6-v2` embedding model (80 MB) is downloaded during Docker build, not at runtime. This eliminates cold-start network downloads.
+
+11. **Anti-Hallucination Guardrails** — The prompt explicitly forces the bot to reject unrelated trivia and completely forbids answering medical or financial inquiries.
 
 ---
 
