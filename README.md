@@ -95,13 +95,15 @@ cloudrun_gcp_initial/
 ├── DEPLOY.md                # Step-by-step GCP deployment guide
 ├── run_dev.sh               # Local dev launcher (cloudflared tunnel)
 ├── run.sh                   # Simple launcher with ngrok
-├── test_rag_cache.py        # Cache + filter tests (17 tests)
-├── test_cache_pipeline.py   # End-to-end pipeline integration tests (18 tests)
-├── test_pipeline.py         # Pipeline unit tests
-├── test_rag.py              # RAG retrieval test
-├── test_bad_queries.py      # Query rewriter test (Hinglish, typos, shortforms)
-├── test_send_receive.py     # End-to-end WhatsApp API test
-└── test_full_simulation.py  # Full conversation simulation test
+├── Test/
+│   ├── test_rag_cache.py        # Cache + filter tests
+│   ├── test_cache_pipeline.py   # End-to-end pipeline integration tests
+│   ├── test_pipeline.py         # Pipeline unit tests
+│   ├── test_rag.py              # RAG retrieval test
+│   ├── test_bad_queries.py      # Query rewriter test (Hinglish, typos, shortforms)
+│   ├── test_send_receive.py     # End-to-end WhatsApp API test
+│   ├── test_kb_insights.py      # KB Insights mock test
+│   └── test_full_simulation.py  # Full conversation simulation test
 ```
 
 ---
@@ -495,6 +497,22 @@ When the bot detects it cannot answer accurately or the user needs human help:
 
 ---
 
+## Automated KB Insights
+
+The bot includes an automated insight generator to help you continuously improve the knowledge base. It reads recent conversations logged in the Audit Spreadsheet to find missing information that caused failures or escalations.
+
+### How to Trigger:
+1. From the designated admin WhatsApp number (`+919818646823`), send the message: **`insights`**
+2. The bot will automatically:
+   - Identify all unprocessed queries in your Audit Google Sheet.
+   - Send the recent difficult queries along with your existing system prompt and context to Gemini.
+   - Generate actionable recommendations of exactly what paragraphs or facts to add to your knowledge base to prevent those hallucinations or escalations.
+   - Save these insights into a new **"KB Insights"** tab in your Google Spreadsheet.
+   - Mark the processed rows as "viewed" so they aren't analyzed twice.
+3. The bot will reply to you on WhatsApp with a success message once the analysis is complete.
+
+---
+
 ## Test Suite
 
 | Script | Tests | Purpose |
@@ -509,13 +527,13 @@ When the bot detects it cannot answer accurately or the user needs human help:
 
 ```bash
 # Run cache + filter tests
-python test_rag_cache.py
+python Test/test_rag_cache.py
 
 # Run pipeline integration tests (no GCP creds needed)
-python test_cache_pipeline.py
+python Test/test_cache_pipeline.py
 
 # Run the full simulation
-python test_full_simulation.py
+python Test/test_full_simulation.py
 ```
 
 ---

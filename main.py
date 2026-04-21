@@ -21,6 +21,7 @@ from bot.rag_cache import RAGCache
 from bot.pipeline import MessagePipeline
 from bot.evaluator import OutputValidator
 from bot.sheets_logger import SheetsAuditLogger
+from bot.kb_insights import KBInsightsGenerator
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -35,6 +36,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting GoHappy chatbot service …")
     cache = RAGCache()
     app.state.cache = cache
+    sheets_logger = SheetsAuditLogger()
     app.state.pipeline = MessagePipeline(
         whatsapp=WhatsAppClient(),
         rag=RAGEngine(),
@@ -42,7 +44,8 @@ async def lifespan(app: FastAPI):
         llm=GeminiChat(),
         cache=cache,
         evaluator=OutputValidator(),
-        sheets_logger=SheetsAuditLogger(),
+        sheets_logger=sheets_logger,
+        kb_insights=KBInsightsGenerator(sheets_logger)
     )
     yield
     logger.info("Shutting down …")

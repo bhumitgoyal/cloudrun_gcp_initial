@@ -1,3 +1,5 @@
+import sys, os
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 """
 test_cache_pipeline.py
 End-to-end pipeline tests demonstrating how the in-memory semantic cache

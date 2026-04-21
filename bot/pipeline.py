@@ -23,6 +23,7 @@ from bot.rag_cache       import RAGCache
 from bot.message_filter  import filter_message
 from bot.evaluator       import OutputValidator
 from bot.sheets_logger   import SheetsAuditLogger
+from bot.kb_insights     import KBInsightsGenerator
 
 logger = logging.getLogger("gohappy.pipeline")
 
@@ -42,6 +43,7 @@ class MessagePipeline:
         cache:         RAGCache,
         evaluator:     OutputValidator  = None,
         sheets_logger: SheetsAuditLogger = None,
+        kb_insights:   KBInsightsGenerator = None,
     ):
         self.wa            = whatsapp
         self.rag           = rag
@@ -50,6 +52,7 @@ class MessagePipeline:
         self.cache         = cache
         self.evaluator     = evaluator
         self.sheets_logger = sheets_logger
+        self.kb_insights   = kb_insights
 
     # ── Entry point called by FastAPI background task ─────────────────────────
 
@@ -73,7 +76,18 @@ class MessagePipeline:
 
         admin_phone = os.environ.get("ADMIN_PHONE_NUMBER")
 
-        # 1.5 Admin Override Logic
+        # 1.5 Admin Override & Insights Logic
+        is_hardcoded_admin = msg.from_number in ("919818646823", "+919818646823")
+        
+        if is_hardcoded_admin and msg.text.strip().lower() == "insights":
+            await self.wa.send_text(
+                to=msg.from_number,
+                body="⏳ Generating KB Insights... This may take a minute.",
+                phone_number_id=msg.phone_number_id
+            )
+            asyncio.create_task(self._run_insights_generator(msg))
+            return
+            
         if admin_phone and msg.from_number == admin_phone:
             if msg.text.startswith("/resolve "):
                 target_phone = msg.text.split(" ")[1].strip()
@@ -308,4 +322,19 @@ Output only the summary text. No preamble. No bullet points.
             reasoning=result.reasoning,
             message_id=msg.wa_message_id,
         )
+
+    # ── KB Insights Trigger ──────────────────────────────────────────────────
+    async def _run_insights_generator(self, msg: IncomingMessage):
+        """
+        Background task to generate KB Insights.
+        """
+        if self.kb_insights:
+            result_text = await self.kb_insights.generate_insights()
+            await self.wa.send_text(
+                to=msg.from_number,
+                body=result_text,
+                phone_number_id=msg.phone_number_id
+            )
+        else:
+            logger.error("KBInsightsGenerator not initialized.")
 
