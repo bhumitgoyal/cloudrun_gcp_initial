@@ -1,4 +1,4 @@
-# GoHappy Club — WhatsApp Chatbot on GCP Cloud Run
+# GoHappy Club — WhatsApp Chatbot on GCP App Engine
 
 ## Architecture
 
@@ -9,7 +9,7 @@ WhatsApp User
 Meta WhatsApp Business API
      │  POST /webhook
      ▼
-Cloud Run (FastAPI)
+App Engine (FastAPI)
      │
      ├─► Message Filter  ──► Blocks links, spam, greetings
      │
@@ -29,7 +29,7 @@ Cloud Run (FastAPI)
 ## Prerequisites
 
 - GCP project with billing enabled
-- APIs enabled: Vertex AI, Firestore, Cloud Run, Cloud Build, Secret Manager
+- APIs enabled: Vertex AI, Firestore, App Engine, Cloud Build
 - Meta Developer account with WhatsApp Business App
 - A Vertex AI RAG Corpus already created and populated
 
@@ -69,20 +69,15 @@ The `conversations` collection is created automatically on first message.
 
 ---
 
-## Step 3 — Store secrets in Secret Manager
+## Step 3 — Store Environment Variables
 
-```bash
-PROJECT=your-gcp-project-id
+Create a local `env_variables.yaml` file natively supported by App Engine. Do not commit this file to version control.
 
-# Store each secret
-echo -n "EAAxxxxxxx" | gcloud secrets create WHATSAPP_ACCESS_TOKEN \
-  --data-file=- --project=$PROJECT
-
-echo -n "123456789" | gcloud secrets create WHATSAPP_PHONE_NUMBER_ID \
-  --data-file=- --project=$PROJECT
-
-echo -n "my-verify-token" | gcloud secrets create WHATSAPP_VERIFY_TOKEN \
-  --data-file=- --project=$PROJECT
+```yaml
+env_variables:
+  GCP_PROJECT_ID: "ghc-chatbot"
+  WHATSAPP_ACCESS_TOKEN: "your-token"
+  WHATSAPP_VERIFY_TOKEN: "your-token"
 ```
 
 ---
@@ -100,7 +95,6 @@ SA=gohappy-bot@${PROJECT}.iam.gserviceaccount.com
 for ROLE in \
   roles/aiplatform.user \
   roles/datastore.user \
-  roles/secretmanager.secretAccessor \
   roles/logging.logWriter; do
   gcloud projects add-iam-policy-binding $PROJECT \
     --member="serviceAccount:${SA}" \
@@ -110,46 +104,23 @@ done
 
 ---
 
-## Step 5 — Deploy to Cloud Run
+## Step 5 — Deploy to App Engine
+
+Create an `app.yaml` file pointing to your Gunicorn entrypoint.
 
 ```bash
-# Build and push container
-gcloud builds submit \
-  --tag gcr.io/$PROJECT/gohappy-bot \
-  --project=$PROJECT
-
-# Deploy
-gcloud run deploy gohappy-bot \
-  --image gcr.io/$PROJECT/gohappy-bot \
-  --platform managed \
-  --region asia-south1 \
-  --service-account gohappy-bot@${PROJECT}.iam.gserviceaccount.com \
-  --allow-unauthenticated \
-  --memory 2Gi \
-  --cpu 1 \
-  --concurrency 80 \
-  --min-instances 0 \
-  --max-instances 2 \
-  --set-env-vars "GCP_PROJECT_ID=$PROJECT,GCP_LOCATION=asia-south1,GEMINI_MODEL=gemini-2.5-flash,VERTEX_RAG_CORPUS=projects/$PROJECT/locations/asia-south1/ragCorpora/CORPUS_ID,CACHE_SIMILARITY_THRESHOLD=0.75,CACHE_TTL_SECONDS=86400,CACHE_MAX_ENTRIES=1000" \
-  --set-secrets "WHATSAPP_ACCESS_TOKEN=WHATSAPP_ACCESS_TOKEN:latest,WHATSAPP_PHONE_NUMBER_ID=WHATSAPP_PHONE_NUMBER_ID:latest,WHATSAPP_VERIFY_TOKEN=WHATSAPP_VERIFY_TOKEN:latest" \
-  --project=$PROJECT
-
-# Allow public access to webhook endpoint ONLY
-gcloud run services add-iam-policy-binding gohappy-bot \
-  --member="allUsers" \
-  --role="roles/run.invoker" \
-  --region=asia-south1 \
-  --project=$PROJECT
+# Push code and dependencies from local directory straight to cloud automatically
+gcloud app deploy app.yaml --project=ghc-chatbot --quiet
 ```
 
-> **Note**: For production, use Cloud Armor or validate the `X-Hub-Signature-256` header instead of making the whole service public.
+> **Note**: App Engine standard allows automatic load balancing and scaling directly from source.
 
 ---
 
 ## Step 6 — Register WhatsApp Webhook
 
 1. Go to [developers.facebook.com](https://developers.facebook.com) → your App → WhatsApp → Configuration
-2. Set **Webhook URL**: `https://YOUR_CLOUD_RUN_URL/webhook`
+2. Set **Webhook URL**: `https://YOUR_APP_ENGINE_URL.appspot.com/webhook`
 3. Set **Verify Token**: same value as your `WHATSAPP_VERIFY_TOKEN` secret
 4. Subscribe to the **messages** webhook field
 
@@ -159,12 +130,10 @@ gcloud run services add-iam-policy-binding gohappy-bot \
 
 ```bash
 # Check health
-curl https://YOUR_CLOUD_RUN_URL/health
+curl https://YOUR_APP_ENGINE_URL.appspot.com/health
 
-# View logs
-gcloud logging read "resource.type=cloud_run_revision AND resource.labels.service_name=gohappy-bot" \
-  --limit=50 --format="table(timestamp,textPayload)" \
-  --project=$PROJECT
+# View logs natively
+gcloud app logs tail -s default --project=$PROJECT
 ```
 
 ---

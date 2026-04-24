@@ -1,0 +1,7 @@
+runtime: python311
+instance_class: F2
+
+entrypoint: gunicorn -k uvicorn.workers.UvicornWorker -w 2 main:app
+
+includes:
+  - env_variables.yaml

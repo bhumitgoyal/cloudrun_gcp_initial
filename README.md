@@ -1,6 +1,6 @@
 # GoHappy Club — WhatsApp AI Support Bot
 
-An intelligent WhatsApp chatbot for **GoHappy Club**, India's senior community platform for people aged 50+. The bot answers member queries about sessions, memberships, Happy Coins, trips, and more — powered by Vertex AI RAG and Gemini 2.5 Flash, backed by Firestore for conversation memory, and deployed fully serverless on GCP Cloud Run.
+An intelligent WhatsApp chatbot for **GoHappy Club**, India's senior community platform for people aged 50+. The bot answers member queries about sessions, memberships, Happy Coins, trips, and more — powered by Vertex AI RAG and Gemini 2.5 Flash, backed by Firestore for conversation memory, and deployed fully serverless on Google App Engine Standard.
 
 ---
 
@@ -20,7 +20,7 @@ An intelligent WhatsApp chatbot for **GoHappy Club**, India's senior community p
          │
          ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  Cloud Run  (FastAPI)                                        │
+│  App Engine  (FastAPI)                                       │
 │                                                              │
 │  1. Parse & deduplicate incoming message                     │
 │  2. Filter junk (links, social media, emojis, greetings)     │
@@ -52,7 +52,7 @@ An intelligent WhatsApp chatbot for **GoHappy Club**, India's senior community p
    └──────────┘      └──────────────┘     └──────────────┘
 ```
 
-**No external cache servers** — the semantic cache runs entirely in-process on Cloud Run. No Redis, no VMs, no extra infrastructure.
+**No external cache servers** — the semantic cache runs entirely in-process on App Engine. No Redis, no VMs, no extra infrastructure.
 
 ---
 
@@ -62,7 +62,7 @@ This project runs entirely on serverless/managed GCP services. **No VMs, no Redi
 
 | Service | Purpose | Required? |
 |---------|---------|-----------|
-| **Cloud Run** | Hosts the FastAPI app | ✅ Yes |
+| **App Engine** | Hosts the FastAPI app | ✅ Yes |
 | **Vertex AI (Gemini 2.5 Flash)** | Query rewrite, answer generation, summary compression | ✅ Yes |
 | **Vertex AI RAG Engine** | Knowledge retrieval from your document corpus | ✅ Yes |
 | **Cloud Firestore** | Conversation memory (per-user state) | ✅ Yes |
@@ -91,7 +91,7 @@ cloudrun_gcp_initial/
 │   └── message_filter.py    # Filters links, social media, emojis, greetings
 ├── .env                     # Environment variables (local dev only)
 ├── requirements.txt         # Python dependencies
-├── Dockerfile               # Multi-stage Docker build for Cloud Run
+├── app.yaml                 # App Engine configuration
 ├── DEPLOY.md                # Step-by-step GCP deployment guide
 ├── run_dev.sh               # Local dev launcher (cloudflared tunnel)
 ├── run.sh                   # Simple launcher with ngrok
@@ -414,51 +414,21 @@ The dev script will:
 
 ---
 
-## Production Deployment (Cloud Run)
+## Production Deployment (App Engine)
 
 See [DEPLOY.md](DEPLOY.md) for the full step-by-step guide covering:
 
 1. Creating the Vertex AI RAG Corpus
 2. Setting up Firestore
-3. Storing secrets in Secret Manager
+3. Setting local config values in env_variables.yaml
 4. Creating a service account with IAM roles
-5. Building and deploying the container to Cloud Run
+5. Building and deploying the app configuration to App Engine
 6. Registering the WhatsApp webhook
 
 ### Quick Deploy
 
 ```bash
-PROJECT=ghc-chatbot
-
-# Build
-gcloud builds submit --tag gcr.io/$PROJECT/gohappy-bot --project=$PROJECT
-
-# Deploy
-gcloud run deploy gohappy-bot \
-  --image gcr.io/$PROJECT/gohappy-bot \
-  --platform managed \
-  --region asia-south1 \
-  --service-account gohappy-bot@${PROJECT}.iam.gserviceaccount.com \
-  --allow-unauthenticated \
-  --memory 2Gi \
-  --cpu 1 \
-  --no-cpu-throttling \
-  --concurrency 80 \
-  --min-instances 1 \
-  --max-instances 10 \
-  --set-env-vars "\
-GCP_PROJECT_ID=$PROJECT,\
-GCP_LOCATION=asia-south1,\
-GEMINI_MODEL=gemini-2.5-flash,\
-VERTEX_RAG_CORPUS=projects/$PROJECT/locations/asia-south1/ragCorpora/<CORPUS_ID>,\
-CACHE_SIMILARITY_THRESHOLD=0.92,\
-CACHE_TTL_SECONDS=86400,\
-CACHE_MAX_ENTRIES=1000" \
-  --set-secrets "\
-WHATSAPP_ACCESS_TOKEN=WHATSAPP_ACCESS_TOKEN:latest,\
-WHATSAPP_PHONE_NUMBER_ID=WHATSAPP_PHONE_NUMBER_ID:latest,\
-WHATSAPP_VERIFY_TOKEN=WHATSAPP_VERIFY_TOKEN:latest" \
-  --project=$PROJECT
+gcloud app deploy app.yaml --project=ghc-chatbot --quiet
 ```
 
 > **Memory**: 2 GiB is required because the `sentence-transformers` embedding model (`all-MiniLM-L6-v2`) uses ~500 MB at runtime. The model is pre-downloaded during Docker build — no internet download on first request.
@@ -558,7 +528,7 @@ python Test/test_full_simulation.py
 | **Semantic Cache** | sentence-transformers + numpy (in-memory) | ≥3.0.0 / ≥1.26.0 |
 | **Embedding Model** | all-MiniLM-L6-v2 (384-dim, Apache 2.0) | — |
 | **HTTP Client** | httpx (async) | 0.27.0 |
-| **Deployment** | GCP Cloud Run (Docker, 2 GiB, 1 vCPU) | — |
+| **Deployment** | GCP App Engine Standard (F2 Instance) | — |
 | **Secrets** | GCP Secret Manager | — |
 | **Local Tunnelling** | Cloudflare Quick Tunnel (`cloudflared`) | — |
 

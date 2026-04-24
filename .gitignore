@@ -215,3 +215,6 @@ secrets.json
 # Logs
 rewrite_test.log
 
+# App Engine Configs
+env_variables.yaml
+
