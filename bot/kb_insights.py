@@ -5,7 +5,7 @@ from typing import Optional
 from gspread import Spreadsheet, Worksheet
 
 import vertexai
-from vertexai.generative_models import GenerativeModel, GenerationConfig
+from vertexai.generative_models import GenerativeModel, GenerationConfig, SafetySetting, HarmCategory, HarmBlockThreshold
 
 from bot.llm import SYSTEM_PROMPT
 from bot.sheets_logger import SheetsAuditLogger
@@ -32,8 +32,14 @@ class KBInsightsGenerator:
         )
         self.generation_config = GenerationConfig(
             temperature=0.4,
-            max_output_tokens=2048,
+            max_output_tokens=8192,
         )
+        self.safety_settings = [
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT,         threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,        threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,  threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
+            SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,  threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
+        ]
 
     async def generate_insights(self) -> str:
         """
@@ -142,6 +148,7 @@ Provide your insights as a professional, clearly formatted report.
             response = await self.model.generate_content_async(
                 llm_prompt,
                 generation_config=self.generation_config,
+                safety_settings=self.safety_settings,
             )
             raw_insights = response.text.strip()
             
