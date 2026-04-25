@@ -121,7 +121,7 @@ class OutputValidator:
         )
         self.generation_config = GenerationConfig(
             temperature=0.1,
-            max_output_tokens=512,
+            max_output_tokens=1024,
             response_mime_type="application/json",
             response_schema={
                 "type": "OBJECT",
@@ -205,13 +205,80 @@ BOT_ANSWER:
 """.strip()
 
     @staticmethod
+    def _repair_json(text: str) -> str:
+        """Best-effort repair of truncated JSON from the grader.
+
+        Common failures:
+        - Unterminated string  → close the open quote
+        - Missing closing braces/brackets → append them
+        """
+        # Close an unterminated string literal
+        # Count unescaped quotes; if odd, the last string was cut off.
+        quotes = re.findall(r'(?<!\\)"', text)
+        if len(quotes) % 2 == 1:
+            # Trim any trailing partial escape or whitespace, then close
+            text = text.rstrip()
+            text += '"'
+
+        # Balance braces / brackets
+        stack: list[str] = []
+        match_map = {'{': '}', '[': ']'}
+        in_string = False
+        escape = False
+        for ch in text:
+            if escape:
+                escape = False
+                continue
+            if ch == '\\':
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch in match_map:
+                stack.append(match_map[ch])
+            elif ch in match_map.values() and stack and stack[-1] == ch:
+                stack.pop()
+
+        # Append missing closers in reverse order
+        text += ''.join(reversed(stack))
+        return text
+
+    @staticmethod
     def _parse(raw: str) -> EvaluationResult:
         """Parse the strict JSON grading output from Gemini."""
         # Strip accidental markdown fences
         cleaned = re.sub(r"^```(?:json)?\s*", "", raw)
         cleaned = re.sub(r"\s*```$", "", cleaned).strip()
 
-        data = json.loads(cleaned)
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            # Attempt repair on truncated / malformed output
+            logger.warning(
+                "Grader returned malformed JSON, attempting repair. "
+                "Raw (first 300 chars): %s",
+                cleaned[:300],
+            )
+            repaired = OutputValidator._repair_json(cleaned)
+            try:
+                data = json.loads(repaired)
+            except json.JSONDecodeError:
+                logger.error(
+                    "JSON repair failed. Repaired text (first 300 chars): %s",
+                    repaired[:300],
+                )
+                # Return a safe default so the pipeline doesn't lose the audit row
+                return EvaluationResult(
+                    accuracy_score=0,
+                    hallucination_check=False,
+                    required_escalation=False,
+                    empathy_score=0,
+                    reasoning="[auto] Grader returned unparseable JSON.",
+                )
+
         return EvaluationResult(
             accuracy_score      = int(data.get("accuracy_score", 0)),
             hallucination_check = bool(data.get("hallucination_check", False)),
