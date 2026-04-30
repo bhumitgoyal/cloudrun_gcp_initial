@@ -311,7 +311,7 @@ Trigger rolling summary compression if due (async)
 
 ```
 conversations/                         # Collection
-  └── <phone_number>/                  # Document (e.g. "919876543210")
+  └── <phone_number>/                  # Document (e.g. "1234567890")
         display_name:       str        # "Ramesh Kumar"
         summary:            str        # AI-generated rolling summary
         turn_count:         int        # Total turns in this session
@@ -479,7 +479,7 @@ When the query *is* related to GoHappy Club, but the bot cannot answer accuratel
 The bot includes an automated insight generator to help you continuously improve the knowledge base. It reads recent conversations logged in the Audit Spreadsheet to find missing information that caused failures or escalations.
 
 ### How to Trigger:
-1. From the designated admin WhatsApp number (`+919818646823`), send the message: **`insights`**
+1. From the designated admin WhatsApp number (`+1234567890`), send the message: **`insights`**
 2. The bot will automatically:
    - Identify all unprocessed queries in your Audit Google Sheet.
    - Send the recent difficult queries along with your existing system prompt and context to Gemini.
