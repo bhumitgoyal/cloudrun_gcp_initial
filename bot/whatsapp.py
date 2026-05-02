@@ -22,6 +22,7 @@ class IncomingMessage:
     display_name: str        # sender's profile name
     phone_number_id: str     # the receiving business phone number ID
     text: str                # message body
+    bot_phone_number: str = "" # the business phone number receiving the message
 
 
 class WhatsAppClient:
@@ -60,11 +61,12 @@ class WhatsAppClient:
                 return None
 
             return IncomingMessage(
-                wa_message_id   = message["id"],
-                from_number     = message["from"],
-                display_name    = contacts[0].get("profile", {}).get("name", "Member"),
-                phone_number_id = value["metadata"]["phone_number_id"],
-                text            = message["text"]["body"].strip(),
+                wa_message_id    = message["id"],
+                from_number      = message["from"],
+                display_name     = contacts[0].get("profile", {}).get("name", "Member"),
+                phone_number_id  = value["metadata"]["phone_number_id"],
+                text             = message["text"]["body"].strip(),
+                bot_phone_number = value["metadata"].get("display_phone_number", ""),
             )
 
         except (KeyError, IndexError, TypeError) as exc:
@@ -106,6 +108,111 @@ class WhatsAppClient:
             return False
         except httpx.RequestError as exc:
             logger.error("WhatsApp request error: %s", exc)
+            return False
+
+    async def mark_as_read(self, message_id: str, phone_number_id: Optional[str] = None) -> bool:
+        """Mark an incoming message as read."""
+        pid = phone_number_id or self.phone_number_id
+        url = f"{GRAPH_API_BASE}/{pid}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type":  "application/json",
+        }
+        data = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id
+        }
+        try:
+            resp = await self._client.post(url, headers=headers, json=data)
+            resp.raise_for_status()
+            logger.debug("Marked message %s as read.", message_id)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to mark message as read: %s", exc)
+            return False
+
+    async def send_typing_indicator(self, to: str, phone_number_id: Optional[str] = None) -> bool:
+        """Show a typing indicator to the user."""
+        pid = phone_number_id or self.phone_number_id
+        url = f"{GRAPH_API_BASE}/{pid}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type":  "application/json",
+        }
+        data = {
+            "messaging_product": "whatsapp",
+            "recipient_type": "individual",
+            "to": to,
+            "sender_action": "typing_on"
+        }
+        try:
+            resp = await self._client.post(url, headers=headers, json=data)
+            resp.raise_for_status()
+            logger.debug("Sent typing indicator to %s.", to)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to send typing indicator: %s", exc)
+            return False
+
+    async def upload_media(self, file_path: str, mime_type: str = "text/plain") -> Optional[str]:
+        """Uploads a file to WhatsApp Media API and returns the media ID."""
+        url = f"{GRAPH_API_BASE}/{self.phone_number_id}/media"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}"
+        }
+        filename = os.path.basename(file_path)
+        
+        try:
+            with open(file_path, "rb") as f:
+                files = {
+                    "file": (filename, f, mime_type)
+                }
+                data = {
+                    "messaging_product": "whatsapp",
+                    "type": mime_type # Wait, WhatsApp expects type in data? Let me double check... no, type is not needed in data, maybe just messaging_product.
+                }
+                # To be safe, Meta API expects files in multipart/form-data
+                resp = await self._client.post(url, headers=headers, data={"messaging_product": "whatsapp"}, files=files)
+                resp.raise_for_status()
+                media_id = resp.json().get("id")
+                logger.info("Uploaded media %s -> id: %s", filename, media_id)
+                return media_id
+        except httpx.HTTPStatusError as exc:
+            logger.error("WhatsApp media upload failed [%s]: %s", exc.response.status_code, exc.response.text)
+            return None
+        except Exception as exc:
+            logger.error("WhatsApp media upload error: %s", exc)
+            return None
+
+    async def send_document(self, to: str, media_id: str, filename: str, caption: str = "") -> bool:
+        """Sends an uploaded document to the user."""
+        url = f"{GRAPH_API_BASE}/{self.phone_number_id}/messages"
+        headers = {
+            "Authorization": f"Bearer {self.access_token}",
+            "Content-Type":  "application/json",
+        }
+        data = {
+            "messaging_product": "whatsapp",
+            "recipient_type":    "individual",
+            "to":                to,
+            "type":              "document",
+            "document": {
+                "id": media_id,
+                "filename": filename,
+                "caption": caption
+            }
+        }
+        try:
+            resp = await self._client.post(url, headers=headers, json=data)
+            resp.raise_for_status()
+            logger.info("Document sent to %s (status %s)", to, resp.status_code)
+            return True
+        except httpx.HTTPStatusError as exc:
+            logger.error("WhatsApp document send failed [%s]: %s", exc.response.status_code, exc.response.text)
+            return False
+        except Exception as exc:
+            logger.error("WhatsApp document send error: %s", exc)
             return False
 
     async def close(self):

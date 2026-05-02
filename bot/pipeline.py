@@ -19,11 +19,13 @@ from bot.whatsapp        import WhatsAppClient, IncomingMessage
 from bot.rag             import RAGEngine
 from bot.memory          import ConversationMemory
 from bot.llm             import GeminiChat, BotResponse
+from bot.moderation      import HinglishModerator
 from bot.rag_cache       import RAGCache
 from bot.message_filter  import filter_message
 from bot.evaluator       import OutputValidator
 from bot.sheets_logger   import SheetsAuditLogger
 from bot.kb_insights     import KBInsightsGenerator
+from bot.kb_manager      import KnowledgeBaseManager
 
 logger = logging.getLogger("gohappy.pipeline")
 
@@ -44,6 +46,7 @@ class MessagePipeline:
         evaluator:     OutputValidator  = None,
         sheets_logger: SheetsAuditLogger = None,
         kb_insights:   KBInsightsGenerator = None,
+        kb_manager:    KnowledgeBaseManager = None,
     ):
         self.wa            = whatsapp
         self.rag           = rag
@@ -53,6 +56,8 @@ class MessagePipeline:
         self.evaluator     = evaluator
         self.sheets_logger = sheets_logger
         self.kb_insights   = kb_insights
+        self.kb_manager    = kb_manager
+        self.moderator     = HinglishModerator()
 
     # ── Entry point called by FastAPI background task ─────────────────────────
 
@@ -97,6 +102,20 @@ class MessagePipeline:
                     body=f"✅ Resolved escalation for {target_phone}. Bot is back in control.",
                     phone_number_id=msg.phone_number_id
                 )
+            elif msg.text.startswith("/update_kb "):
+                await self.wa.send_text(
+                    to=admin_phone, 
+                    body="⏳ Processing your KB update request with Gemini... Please wait.",
+                    phone_number_id=msg.phone_number_id
+                )
+                asyncio.create_task(self._handle_update_kb(msg))
+            elif msg.text.strip().lower() == "/approve_kb":
+                await self.wa.send_text(
+                    to=admin_phone, 
+                    body="⏳ Approving update and syncing to Vertex AI... Please wait.",
+                    phone_number_id=msg.phone_number_id
+                )
+                asyncio.create_task(self._handle_approve_kb(msg))
             else:
                 await self.wa.send_text(
                     to=admin_phone,
@@ -113,6 +132,9 @@ class MessagePipeline:
         if len(_SEEN_IDS) > _SEEN_MAX:
             _SEEN_IDS.pop()
 
+        # Mark message as read
+        asyncio.create_task(self.wa.mark_as_read(msg.wa_message_id, msg.phone_number_id))
+
         # 2.5 Filter out junk messages (links, forwards, emojis, greetings)
         filter_result = filter_message(msg.text)
         if not filter_result.is_actionable:
@@ -123,6 +145,9 @@ class MessagePipeline:
             return
 
         logger.info("Processing message from %s: %.80s", msg.from_number, msg.text)
+        
+        # Show typing indicator to user
+        asyncio.create_task(self.wa.send_typing_indicator(msg.from_number, msg.phone_number_id))
 
         # 3. Load conversation state from Firestore
         state = await self.memory.get_state(msg.from_number)
@@ -130,6 +155,25 @@ class MessagePipeline:
         if state.get("escalated_to_human", False):
             logger.info("Ignoring message from %s, currently escalated to human.", msg.from_number)
             return
+
+        # 3.4 Indic-aware Input Moderation
+        mod_result = await self.moderator.analyze_message(msg.text)
+        logger.info("Moderation input result: %s", mod_result)
+        
+        severity = mod_result.get("severity", "none")
+        if severity == "targeted_abuse":
+            bot_response = BotResponse(
+                answer="Your message violates our community guidelines. An admin will review this conversation.",
+                escalation=True
+            )
+            await self.wa.send_text(to=msg.from_number, body=bot_response.answer, phone_number_id=msg.phone_number_id)
+            await self._handle_escalation(msg, bot_response, state)
+            return
+            
+        is_frustrated = (severity == "frustration")
+        if severity in ["conversational", "frustration"]:
+            # Override text to remove filler profanity so RAG/LLM isn't distracted
+            msg.text = mod_result.get("stripped_text", msg.text)
 
         # 3.5 Polish query for better RAG retrieval
         polished_query = await self.llm.rewrite_query(msg.text)
@@ -162,7 +206,16 @@ class MessagePipeline:
             conversation_history = conversation_history,
             user_query           = msg.text,
             retrieved_context    = retrieved_context,
+            is_frustrated        = is_frustrated,
         )
+
+        # 6.2 Output Moderation (RAG leakage protection)
+        out_mod_result = await self.moderator.analyze_message(bot_response.answer)
+        out_severity = out_mod_result.get("severity", "none")
+        if out_severity in ["targeted_abuse", "frustration"]:
+            logger.warning("Blocked unsafe bot output: %s", bot_response.answer)
+            bot_response.answer = "I apologize, but I am unable to process this request at the moment. Please let me know if you need help with anything else."
+
 
         # 6.5 Cache the response (skips escalation responses automatically)
         # await self.cache.set(polished_query, {
@@ -230,12 +283,16 @@ class MessagePipeline:
         # 2. Alert the Admin via WhatsApp
         admin_phone = os.environ.get("ADMIN_PHONE_NUMBER")
         if admin_phone:
+            clean_bot_phone = "".join(filter(str.isdigit, msg.bot_phone_number))
+            resolve_link = f"https://wa.me/{clean_bot_phone}?text=%2Fresolve%20{msg.from_number}"
+
             alert_text = (
                 f"🚨 *ESCALATION REQUIRED*\n"
                 f"User: {msg.display_name} ({msg.from_number})\n\n"
                 f"Issue: {msg.text}\n\n"
                 f"Bot replied: {bot_response.answer}\n\n"
-                f"Reply to them directly from your WhatsApp App. When finished, reply here with `/resolve {msg.from_number}` to turn the bot back on for them."
+                f"Reply to them directly from your WhatsApp App. When finished, click the link below to unpause the bot for this user:\n"
+                f"{resolve_link}"
             )
             await self.wa.send_text(
                 to=admin_phone,
@@ -337,4 +394,63 @@ Output only the summary text. No preamble. No bullet points.
             )
         else:
             logger.error("KBInsightsGenerator not initialized.")
+
+    # ── KB Automation Handlers ───────────────────────────────────────────────
+    async def _handle_update_kb(self, msg: IncomingMessage):
+        if not self.kb_manager:
+            logger.error("KnowledgeBaseManager not initialized.")
+            return
+
+        admin_input = msg.text[len("/update_kb "):].strip()
+        try:
+            new_kb = await self.kb_manager.generate_update(admin_input)
+            await self.kb_manager.save_pending_update(new_kb)
+            
+            # Save file locally to upload to whatsapp
+            import os
+            file_path = "/tmp/GoHappyClub_KnowledgeBase.md"
+            with open(file_path, "w") as f:
+                f.write(new_kb)
+
+            # Upload to WhatsApp Media
+            media_id = await self.wa.upload_media(file_path, mime_type="text/plain")
+            if media_id:
+                await self.wa.send_document(
+                    to=msg.from_number,
+                    media_id=media_id,
+                    filename="Updated_KB_Draft.md",
+                    caption="📄 Here is the updated Knowledge Base draft. Please review it. Reply with `/approve_kb` to confirm and sync to Vertex AI, or send another `/update_kb` command to make further changes."
+                )
+            else:
+                await self.wa.send_text(
+                    to=msg.from_number,
+                    body="❌ Failed to upload the document to WhatsApp. Check server logs.",
+                    phone_number_id=msg.phone_number_id
+                )
+        except Exception as exc:
+            logger.error("Error in KB update: %s", exc, exc_info=True)
+            await self.wa.send_text(
+                to=msg.from_number,
+                body=f"❌ Failed to process KB update: {exc}",
+                phone_number_id=msg.phone_number_id
+            )
+
+    async def _handle_approve_kb(self, msg: IncomingMessage):
+        if not self.kb_manager:
+            logger.error("KnowledgeBaseManager not initialized.")
+            return
+            
+        success = await self.kb_manager.approve_and_sync()
+        if success:
+            await self.wa.send_text(
+                to=msg.from_number,
+                body="✅ Successfully approved! The new Knowledge Base has been synced to Vertex AI RAG Corpus.",
+                phone_number_id=msg.phone_number_id
+            )
+        else:
+            await self.wa.send_text(
+                to=msg.from_number,
+                body="❌ Failed to sync to Vertex AI RAG Corpus. Please check the server logs.",
+                phone_number_id=msg.phone_number_id
+            )
 

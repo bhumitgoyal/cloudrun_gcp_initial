@@ -22,6 +22,7 @@ from bot.pipeline import MessagePipeline
 from bot.evaluator import OutputValidator
 from bot.sheets_logger import SheetsAuditLogger
 from bot.kb_insights import KBInsightsGenerator
+from bot.kb_manager import KnowledgeBaseManager
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -45,7 +46,8 @@ async def lifespan(app: FastAPI):
         cache=cache,
         evaluator=OutputValidator(),
         sheets_logger=sheets_logger,
-        kb_insights=KBInsightsGenerator(sheets_logger)
+        kb_insights=KBInsightsGenerator(sheets_logger),
+        kb_manager=KnowledgeBaseManager()
     )
     yield
     logger.info("Shutting down …")

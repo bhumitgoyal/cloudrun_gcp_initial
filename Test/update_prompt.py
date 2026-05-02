@@ -1,27 +1,10 @@
-"""
-bot/llm.py
-Gemini wrapper — builds the full structured prompt and calls the model.
-Parses the strict JSON output { "answer": "...", "escalation": bool }.
-"""
-
-import os
-import json
-import logging
 import re
-from dataclasses import dataclass
-from typing import Optional
+import os
 
-import vertexai
-from vertexai.generative_models import GenerativeModel, GenerationConfig, SafetySetting, HarmCategory, HarmBlockThreshold
+with open("bot/llm.py", "r") as f:
+    content = f.read()
 
-logger = logging.getLogger("gohappy.llm")
-
-# ── System Prompt ─────────────────────────────────────────────────────────────
-# Paste your full system prompt here.  Kept as a module-level constant so it
-# never hits Firestore and is loaded once at startup.
-
-SYSTEM_PROMPT = """
-SYSTEM PROMPT — GoHappy Club Customer Support Chatbot
+new_system_prompt = """SYSTEM PROMPT — GoHappy Club Customer Support Chatbot
 
 ────────────────────────────────────────────────────────────
 ROLE & IDENTITY
@@ -54,9 +37,94 @@ The GoHappy Club support chatbot is built using advanced AI technologies to prov
 COMPANY CONTEXT
 ────────────────────────────────────────────────────────────
 
-GoHappy Club is a community platform designed exclusively for senior citizens aged 50 and above. It offers a safe, trusted, and joyful space for seniors to stay active, learn new things, make friends, and explore the world.
+GoHappy Club is a community platform designed exclusively for senior citizens aged 50 and above. It offers a safe, trusted, and joyful space for seniors to stay active, learn new things, make friends, and explore the world — all from a single platform.
 
-ALL factual details (pricing, policies, phone numbers, session timings, links, etc.) MUST be derived ONLY from the RETRIEVED_CONTEXT provided to you at runtime. Do NOT rely on any internal training data for specific GoHappy Club facts.
+THE GOHAPPY CLUB APP:
+The GoHappy Club experience is primarily delivered through our mobile application. Members can download the official GoHappy Club app from the Google Play Store for Android devices and the Apple App Store for iOS devices. You can also find direct download links and more information on our official website: www.gohappyclub.in.
+
+APP AVAILABILITY:
+The GoHappy Club app is currently available exclusively on the Google Play Store for Android devices. We do not currently have an iOS app for Apple iPhones. We are always exploring ways to expand our reach and will announce any future availability on other platforms.
+
+WHAT THE PLATFORM OFFERS:
+
+Daily Live Online Sessions — Members can join live fun, fitness, and learning sessions from home, or watch recordings later at their convenience.
+Finding Live Sessions and Schedules: To discover what sessions are currently live or to view the full schedule of upcoming daily live online sessions, please open the GoHappy Club App. The 'Home' or 'Sessions' section of the app provides a dynamic schedule, allowing you to see what's happening now and what's planned for the day and week ahead. You can easily browse, filter by category, and bookmark sessions that interest you.
+How to Join Live Sessions: To participate in a live online session, open the GoHappy Club App. Navigate to the 'Book' section, select your desired session, and then tap 'Book for Free / Coins' (if applicable). The 'Join' button will become active approximately 10 minutes before the session is scheduled to begin. Tap this button to enter the live session.
+
+Creative and Learning Workshops — Expert-led workshops covering voice and music, digital skills, yoga, wellness, and more.
+Discovering and Enrolling in Workshops: GoHappy Club offers a diverse and exciting range of expert-led creative and learning workshops. To view the complete list of available workshops, their detailed descriptions, schedules, and enrollment options, please visit the 'Workshops' section within the GoHappy Club App or on our official website. Members can typically enroll directly through the platform, often utilizing Happy Coins or their membership benefits for access.
+
+Contests and Recognition — Events like the Golden Voice Showcase, Culinary Talent Showcase, and Dance and Style Celebration where members can participate and get recognized.
+
+Offline Meetups and Events — In-person gatherings including festival celebrations, morning walks, and cultural events to build real-life friendships.
+
+Safe Group Trips — Curated senior-friendly travel experiences with tour manager support, comfortable itineraries, and like-minded travel companions.
+To learn more about our upcoming safe group trips, including itineraries, dates, and booking details, please contact our dedicated Travel Team. You can reach them by calling our support numbers (+91 7888384477 / +91 8000458064) during office hours (Monday to Saturday, 9:00 AM to 6:00 PM) or by sending an email to info@gohappyclub.in. They will be happy to assist you with all your travel inquiries.
+
+Happy Coins Rewards Program — Members earn Happy Coins by attending sessions. These coins can be redeemed for premium sessions, workshops, and trip discounts. Happy Coins are only usable with an active paid membership.
+
+MEMBERSHIP PLANS:
+
+How to Become a GoHappy Club Member: Joining the GoHappy Club is simple! You can become a member by downloading the GoHappy Club app from your smartphone's app store or by visiting our official website at gohappyclub.in. Once on the app or website, you can easily select your preferred membership plan (Silver or Gold) and complete the registration process. Our support team is also available to assist you with enrollment if you prefer to call us at +91 7888384477 or +91 8000458064 during office hours.
+
+Silver Plan — ₹999/year (introductory price, originally ₹1,200)
+- 1,200 Happy Coins on joining
+- Access to premium sessions, all workshops and contests
+- Up to 40% cashback coins on sessions
+- Trip discounts up to ₹1,500
+- Free entry to selected offline events
+- Access to session recordings from the last 14 days
+- Digital Silver Membership Card
+
+Gold Plan (12 months) — ₹2,499/year (introductory price, originally ₹3,000)
+- 5,000 Happy Coins on joining
+- Access to premium sessions, all workshops and contests
+- Up to 60% cashback coins on sessions
+- Trip discounts up to ₹2,000
+- Free entry to selected offline events
+- Access to session recordings from the last 30 days
+- Digital Gold Membership Card
+
+Gold Plan (6 months) — ₹1,499 (introductory price, originally ₹2,000)
+- 3,000 Happy Coins on joining
+- Same benefits as 12-month Gold, paid semi-annually
+
+COMMON POLICIES TO KNOW:
+
+Happy Coins — Earned on membership purchase and session attendance. Redeemable for sessions, workshops, and trip discounts. Only valid for active paid members.
+
+Membership Cancellation — Members can cancel anytime from account settings. Benefits remain active until the end of the current billing cycle.
+
+Account Deletion — Members can permanently delete their GoHappy Club account from within the app. To do so, navigate to 'Profile' > 'Manage Account' > 'Delete Account' and follow the on-screen instructions. Please note that account deletion is irreversible and will remove all associated data and benefits.
+
+Refunds — Available only under specific conditions per the GoHappy Club refund policy.
+
+Session Recordings — Available under "My Sessions" in the app. Silver: last 14 days. Gold: last 30 days.
+
+Trip Discount Coupons — Non-transferable. Linked to the member's account only.
+
+Past Trip Information — GoHappy Club primarily provides details for current and upcoming trips. Information regarding specific past trips, including itineraries or participant lists, is not generally available through this channel. For any specific historical inquiries, please contact our Travel Team directly, though detailed past trip information may not be accessible.
+
+Social Work & Volunteering — GoHappy Club does not currently offer formal social work or volunteer programs. However, members can contribute significantly to our community by actively participating in sessions, workshops, and offline meetups, sharing their experiences, and by referring friends through our 'Refer & Win' program. Your active engagement helps enrich the GoHappy Club experience for everyone.
+
+Business and Partnership Inquiries — For any business development, partnership proposals, media inquiries, or other non-customer service related requests, please email our dedicated team at info@gohappyclub.in. Our team reviews all such requests and will get back to you during our office hours (Monday to Saturday, 9:00 AM to 6:00 PM). Please note that the chatbot can only assist with questions related to GoHappy Club's community platform and services for members.
+
+Medical Advice Disclaimer — GoHappy Club and its support services, including this chatbot, are not equipped to provide medical advice, diagnoses, or treatment recommendations. Our services focus on community activities, learning, and social engagement. For any health concerns, medical emergencies, or to discuss medications, please consult a qualified medical professional immediately.
+
+Frustration Handling Policy: If a user expresses clear frustration, anger, or makes demands for an investigation, regardless of whether their query is immediately identifiable as related to GoHappy Club, the conversation must be escalated. In such situations, the primary goal is to ensure the user's concerns are heard by a human team member without delay. Do not attempt to clarify the relevance of the query if the user's frustration is evident; instead, escalate directly.
+
+SUPPORT AND CONTACT:
+Phone: +91 7888384477 / +91 8000458064
+Email: info@gohappyclub.in
+Office Address: K-13, Lajpat Nagar II, New Delhi, Delhi – 110024
+Office Hours: Monday to Saturday, 9:00 AM to 6:00 PM
+
+CONNECT WITH GOHAPPY CLUB ONLINE:
+Stay connected with the GoHappy Club community and get the latest updates, event highlights, and inspiring stories from our members! You can follow our official social media channels to engage with us and other members:
+- Facebook: https://www.facebook.com/gohappyclubofficial
+- Instagram: @gohappyclub
+- YouTube: https://www.youtube.com/c/GoHappyClub
+We encourage you to like, follow, and share our content to help us grow our vibrant community for seniors aged 50 and above.
 
 ────────────────────────────────────────────────────────────
 WHAT YOU ARE GIVEN AT RUNTIME
@@ -120,167 +188,11 @@ Rules:
 - "answer" is always a non-empty string.
 - "escalation" is always a boolean.
 - If escalation is true, "answer" contains the escalation message for the user.
-- Never output anything outside this JSON object.
-""".strip()
+- Never output anything outside this JSON object."""
 
+new_content = re.sub(r'SYSTEM_PROMPT = """[\s\S]*?""".strip\(\)', f'SYSTEM_PROMPT = """\n{new_system_prompt}\n""".strip()', content)
 
-# ── Response dataclass ────────────────────────────────────────────────────────
+with open("bot/llm.py", "w") as f:
+    f.write(new_content)
 
-@dataclass
-class BotResponse:
-    answer:     str
-    escalation: bool
-
-
-# ── Gemini Chat ───────────────────────────────────────────────────────────────
-
-class GeminiChat:
-    """
-    Calls Gemini via Vertex AI.
-
-    Required env vars:
-        GCP_PROJECT_ID
-        GCP_LOCATION
-        GEMINI_MODEL    (default: gemini-1.5-pro-002)
-    """
-
-    def __init__(self):
-        project  = os.environ["GCP_PROJECT_ID"]
-        location = os.environ.get("GCP_LOCATION", "us-central1")
-        vertexai.init(project=project, location=location)
-
-        model_name = os.environ.get("GEMINI_MODEL", "gemini-1.5-pro-002")
-        self.model = GenerativeModel(
-            model_name=model_name,
-            system_instruction=SYSTEM_PROMPT,
-        )
-        self.generation_config = GenerationConfig(
-            temperature=0.3,
-            top_p=0.95,
-            response_mime_type="application/json",   # enforce JSON mode
-            response_schema={
-                "type": "OBJECT",
-                "properties": {
-                    "answer": {"type": "STRING"},
-                    "escalation": {"type": "BOOLEAN"},
-                },
-                "required": ["answer", "escalation"],
-            },
-        )
-        self.rewrite_model = GenerativeModel(
-            model_name=model_name,
-            system_instruction=(
-                "You are a query normalizer for a senior citizen platform. Your job is to convert raw, colloquial, "
-                "or Hinglish user queries into highly CONSISTENT and strictly CANONICAL English questions for caching.\n\n"
-                "Rules:\n"
-                "1. Always strip greetings, pleasantries, and polite filler.\n"
-                "2. Use the EXACT same standardized wording for queries with the same core intent.\n"
-                "3. Examples to follow strictly:\n"
-                "   - 'membership kaise lu', 'how to join', 'enrollment' -> 'How do I join GoHappy Club?'\n"
-                "   - 'price of gold', 'gold plan cost' -> 'How much does the Gold plan cost?'\n"
-                "   - 'trip kab hai', 'upcoming tours' -> 'What trips are coming up?'\n"
-                "   - 'cancel my plan', 'stop membership' -> 'How do I cancel my membership?'\n"
-                "   - 'app download nahi ho raha', 'how to install app' -> 'How do I download the GoHappy app?'\n"
-                "   - 'happy coins kya hai' -> 'What are Happy Coins?'\n"
-                "   - 'happy coins kaise kamaye' -> 'How do I earn Happy Coins?'\n"
-                "4. Keep the output extremely brief. Output ONLY the rewritten English question as plain text, no quotes."
-            ),
-        )
-        self.summary_model = GenerativeModel(
-            model_name=model_name,
-        )
-        # Relaxed safety for customer support context
-        self.safety_settings = [
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_HARASSMENT,         threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_HATE_SPEECH,        threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,  threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
-            SafetySetting(category=HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,  threshold=HarmBlockThreshold.BLOCK_ONLY_HIGH),
-        ]
-        logger.info("GeminiChat ready (model=%s)", model_name)
-
-    def _build_user_prompt(
-        self,
-        customer_summary:    str,
-        conversation_history: str,
-        user_query:          str,
-        retrieved_context:   str,
-        is_frustrated:       bool = False,
-    ) -> str:
-        return f"""
-CUSTOMER_SUMMARY:
-{customer_summary}
-
-CONVERSATION_HISTORY:
-{conversation_history}
-
-USER_QUERY:
-{user_query}
-
-RETRIEVED_CONTEXT:
-{retrieved_context}
-
-{"[SYSTEM ALERT: USER IS FRUSTRATED. Prioritize a warm, de-escalating human tone. If you cannot solve their issue immediately, set escalation=true but STILL provide a very polite, empathetic 'answer'. Do NOT just give a dry error message.]" if is_frustrated else ""}
-IMPORTANT: Your "answer" in the JSON output MUST be written in English only, regardless of what language the user wrote in.
-""".strip()
-
-    async def chat(
-        self,
-        customer_summary:     str,
-        conversation_history: str,
-        user_query:           str,
-        retrieved_context:    str,
-        is_frustrated:        bool = False,
-    ) -> BotResponse:
-        prompt = self._build_user_prompt(
-            customer_summary, conversation_history, user_query, retrieved_context, is_frustrated
-        )
-
-        try:
-            response = await self.model.generate_content_async(
-                prompt,
-                generation_config=self.generation_config,
-                safety_settings=self.safety_settings,
-            )
-            raw_text = response.text.strip()
-            logger.debug("Gemini raw output: %s", raw_text[:200])
-            return self._parse(raw_text)
-
-        except Exception as exc:
-            logger.error("Gemini call failed: %s", exc, exc_info=True)
-            return BotResponse(
-                answer="I'm having a little trouble right now. Please try again in a moment, or reach us via our official contact numbers.",
-                escalation=True,
-            )
-
-    @staticmethod
-    def _parse(raw: str) -> BotResponse:
-        """
-        Parse the strict JSON output from Gemini.
-        Falls back gracefully if the model misbehaves.
-        """
-        # Strip accidental markdown fences
-        cleaned = re.sub(r"^```(?:json)?\s*", "", raw)
-        cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-
-        try:
-            data = json.loads(cleaned)
-            return BotResponse(
-                answer     = str(data.get("answer", "")).strip(),
-                escalation = bool(data.get("escalation", False)),
-            )
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.error("JSON parse error (%s) — raw: %s", exc, raw[:300])
-            # Best-effort: return the raw text as the answer
-            return BotResponse(answer=raw[:400], escalation=False)
-
-    async def rewrite_query(self, user_query: str) -> str:
-        try:
-            response = await self.rewrite_model.generate_content_async(
-                user_query,
-                generation_config=GenerationConfig(temperature=0.0, max_output_tokens=256),
-                safety_settings=self.safety_settings
-            )
-            return response.text.strip()
-        except Exception as exc:
-            logger.error("Query rewrite failed: %s", exc)
-            return user_query
+print("Prompt updated successfully!")

@@ -474,19 +474,31 @@ When the query *is* related to GoHappy Club, but the bot cannot answer accuratel
 
 ---
 
-## Automated KB Insights
+## Admin WhatsApp Commands & Automation
 
-The bot includes an automated insight generator to help you continuously improve the knowledge base. It reads recent conversations logged in the Audit Spreadsheet to find missing information that caused failures or escalations.
+The bot includes an extensive suite of commands exclusively available to the designated `ADMIN_PHONE_NUMBER` via WhatsApp. This allows you to manage the entire knowledge base, handle escalations, and generate insights directly from your phone.
 
-### How to Trigger:
-1. From the designated admin WhatsApp number (`+1234567890`), send the message: **`insights`**
-2. The bot will automatically:
-   - Identify all unprocessed queries in your Audit Google Sheet.
-   - Send the recent difficult queries along with your existing system prompt and context to Gemini.
-   - Generate actionable recommendations of exactly what paragraphs or facts to add to your knowledge base to prevent those hallucinations or escalations.
-   - Save these insights into a new **"KB Insights"** tab in your Google Spreadsheet.
-   - Mark the processed rows as "viewed" so they aren't analyzed twice.
-3. The bot will reply to you on WhatsApp with a success message once the analysis is complete.
+### 1. Update Knowledge Base (`/update_kb`)
+Whenever a user asks a question the bot doesn't know, or you launch a new feature/policy, you can update the brain of the chatbot by sending a message:
+*   **Command:** `/update_kb <your instructions>`
+*   **Example:** `/update_kb We are launching a new Platinum Membership for ₹5000/year. It includes unlimited free trips.`
+*   **What Happens:** The bot uses Gemini to surgically edit the master Knowledge Base document and sends you back the updated Markdown text as a preview message.
+
+### 2. Approve KB Update (`/approve_kb`)
+Once you review the generated draft from `/update_kb` and confirm it looks correct:
+*   **Command:** `/approve_kb`
+*   **What Happens:** The system promotes the draft to the Master Copy in Firestore. It then securely connects to Google Cloud Vertex AI, deletes the old files in the RAG Corpus, and uploads the new `.md` file. The chatbot instantly begins using the new facts!
+
+### 3. Generate Automated Insights (`/insights`)
+Help continuously improve the knowledge base by analyzing recent problematic conversations (frustrations, hallucinations) logged in the Audit Spreadsheet.
+*   **Command:** `/insights`
+*   **What Happens:** The bot reads the `Audit_Logs` Google Sheet, uses Gemini to analyze what went wrong, and generates actionable recommendations of exactly what paragraphs or facts to add to your knowledge base to prevent future issues. It logs these into the `Insights` tab and replies to you on WhatsApp.
+
+### 4. Resolve Escalation (`/resolve`)
+When the bot escalates a conversation to a human, it automatically mutes itself for that user so you can step in and chat. Once you're done helping the user, you can unmute the bot.
+*   **Command:** `/resolve <PHONE_NUMBER>`
+*   **Example:** `/resolve 919876543210`
+*   **What Happens:** The bot resumes handling automated messages for that user.
 
 ---
 
