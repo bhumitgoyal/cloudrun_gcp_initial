@@ -177,9 +177,19 @@ Provide your insights as a professional, clearly formatted report.
             logger.info("Successfully analyzed %d queries and added insights.", len(unprocessed_rows))
             return f"✅ Successfully analyzed {len(unprocessed_rows)} new queries!\nInsights have been saved to the 'KB Insights' tab in your Google Sheet."
 
+        except PermissionError:
+            logger.error("Failed to generate KB insights: service account lacks permission to access the spreadsheet", exc_info=True)
+            return (
+                "❌ Permission denied accessing the Audit Spreadsheet.\n\n"
+                "The App Engine service account needs access. "
+                "Please share the Google Sheet with:\n"
+                f"`{os.environ.get('GOOGLE_CLOUD_PROJECT', 'your-sa')}@appspot.gserviceaccount.com`\n"
+                "or check the service account email in GCP Console."
+            )
         except Exception as exc:
             logger.error("Failed to generate KB insights: %s", exc, exc_info=True)
-            return f"❌ Failed to generate insights. Error: {str(exc)}"
+            error_detail = str(exc) or repr(exc) or type(exc).__name__
+            return f"❌ Failed to generate insights. Error: {error_detail}"
 
     @staticmethod
     def _col_num_to_letter(col_num: int) -> str:
@@ -188,3 +198,44 @@ Provide your insights as a professional, clearly formatted report.
             col_num, remainder = divmod(col_num - 1, 26)
             string = chr(65 + remainder) + string
         return string
+
+    async def get_latest_insight(self) -> str:
+        """
+        Read the last row from the "KB Insights" worksheet and return
+        the insights text (column 3 — "Insights & Recommendations").
+
+        Returns the insight text, or raises if no insights exist.
+        """
+        self.sheets_logger._ensure_initialised()
+        client = self.sheets_logger._client
+        spreadsheet_id = self.sheets_logger.get_spreadsheet_id()
+
+        if not spreadsheet_id:
+            raise ValueError("No Audit Spreadsheet found. Run /insights first.")
+
+        spreadsheet = client.open_by_key(spreadsheet_id)
+
+        try:
+            insights_sheet = spreadsheet.worksheet("KB Insights")
+        except Exception:
+            raise ValueError("No 'KB Insights' worksheet found. Run /insights first to generate insights.")
+
+        all_values = insights_sheet.get_all_values()
+        # Skip header row (row 0)
+        if len(all_values) <= 1:
+            raise ValueError("No insight rows found. Run /insights first to generate insights.")
+
+        last_row = all_values[-1]
+        # Columns: [Timestamp, New Queries Analyzed, Insights & Recommendations]
+        timestamp = last_row[0] if len(last_row) > 0 else "Unknown"
+        queries_count = last_row[1] if len(last_row) > 1 else "?"
+        insight_text = last_row[2] if len(last_row) > 2 else ""
+
+        if not insight_text.strip():
+            raise ValueError(f"Last insight row (from {timestamp}) has empty recommendations.")
+
+        logger.info(
+            "Retrieved latest insight from %s (%s queries analyzed, %d chars)",
+            timestamp, queries_count, len(insight_text),
+        )
+        return insight_text

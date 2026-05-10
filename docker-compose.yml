@@ -1,4 +1,5 @@
 # docker-compose.yml
+# LOCAL DEVELOPMENT ONLY — not used in App Engine production deployment.
 # Local Redis Stack with RediSearch module for semantic cache development.
 #
 # Usage:

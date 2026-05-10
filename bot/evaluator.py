@@ -53,11 +53,20 @@ GRADING RUBRIC
    - 70–89:  Mostly correct but missing a minor detail.
    - 50–69:  Partially correct; key information is missing or vague.
    - 0–49:   Wrong, misleading, or completely off-topic.
+   SPECIAL CASES:
+   - Out-of-scope rejection: If the user's query was unrelated to GoHappy Club
+     (e.g., biodata, political message, chain forward, general trivia) and the
+     bot correctly identified it and politely redirected the user, score 90–100.
+   - Greeting handling: If the user sent a social greeting and the bot acknowledged
+     it warmly while pivoting to GoHappy assistance, score 90–100.
 
 2. hallucination_check (boolean):
    - true  if the bot stated facts, prices, policies, or names NOT present
      in the RETRIEVED_CONTEXT. Minor phrasing differences are OK.
    - false if the answer is grounded in the retrieved context or the system prompt.
+   IMPORTANT: Fabricating or assuming a customer's name (e.g., addressing the user
+   as "Sanjay" or "Lalit" when no name was provided in the query or context) counts
+   as hallucination. Flag this as true.
 
 3. required_escalation (boolean):
    - true  if the query involves account-specific issues, payment disputes,
@@ -68,6 +77,11 @@ GRADING RUBRIC
    - Measures warmth, patience, clarity, and appropriateness for a senior
      citizen audience. Penalise jargon, cold tone, overly long replies,
      or dismissive phrasing. Reward simple language and kind tone.
+   PENALTIES:
+   - Using a customer name that was NOT confirmed in the conversation context:
+     deduct 15–25 points. This feels presumptuous and can confuse seniors.
+   - Overly technical language or jargon: deduct 10–20 points.
+   - Dismissive or curt tone when user seems confused: deduct 15–25 points.
 
 5. reasoning (string, 1–3 sentences):
    - Brief English explanation justifying the scores above.

@@ -7,8 +7,8 @@ google-cloud-aiplatform[preview]==1.71.1
 vertexai==1.71.1
 
 # Semantic RAG cache (in-memory, no Redis)
-sentence-transformers>=3.0.0
-numpy>=1.26.0
+
+
 
 # Post-Validation Quality Audit
 gspread>=6.0.0

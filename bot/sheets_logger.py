@@ -54,7 +54,7 @@ class SheetsAuditLogger:
     def _ensure_initialised(self):
         """
         Connects to Google Sheets on first call.
-        Uses Application Default Credentials (ADC), which on Cloud Run
+        Uses Application Default Credentials (ADC), which on App Engine
         maps to the service account automatically.
         """
         if self._initialised:
@@ -67,7 +67,7 @@ class SheetsAuditLogger:
             logger.info("Using local secrets.json for Google Sheets authentication.")
             self._client = gspread.service_account(filename="secrets.json")
         else:
-            # 2. Fall back to Application Default Credentials (e.g. on Cloud Run)
+            # 2. Fall back to Application Default Credentials (e.g. on App Engine)
             from google.auth import default
             scopes = [
                 "https://www.googleapis.com/auth/spreadsheets",

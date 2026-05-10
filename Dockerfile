@@ -1,3 +1,13 @@
+# ── Dockerfile (App Engine Flex / local dev) ──────────────────────────────────
+# App Engine Standard (python311) deploys directly from source — no Dockerfile
+# needed. This file is kept for:
+#   1. Local Docker-based development/testing
+#   2. Potential future migration to App Engine Flexible
+#
+# App Engine Standard deployment:
+#   gcloud app deploy app.yaml --project=ghc-chatbot --quiet
+# ──────────────────────────────────────────────────────────────────────────────
+
 # ── Build stage ────────────────────────────────────────────────────────────
 FROM python:3.11-slim AS builder
 
@@ -11,9 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
-# Pre-download the embedding model during build (avoids cold-start download)
-RUN PYTHONPATH=/install/lib/python3.11/site-packages \
-    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
 
 
 # ── Runtime stage ───────────────────────────────────────────────────────────
@@ -27,18 +35,12 @@ WORKDIR /app
 # Copy installed packages from build stage
 COPY --from=builder /install /usr/local
 
-# Copy pre-downloaded model from build stage cache
-COPY --from=builder /root/.cache/huggingface /home/appuser/.cache/huggingface
-
 # Copy application code
 COPY --chown=appuser:appuser . .
 
-# Fix ownership of the model cache
-RUN chown -R appuser:appuser /home/appuser/.cache
-
 USER appuser
 
-# Cloud Run sets PORT automatically; default 8080
+# App Engine sets PORT automatically; default 8080
 ENV PORT=8080
 EXPOSE 8080
 

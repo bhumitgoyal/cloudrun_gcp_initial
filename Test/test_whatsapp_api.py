@@ -180,8 +180,8 @@ async def run():
     banner("VERIFICATION COMPLETE")
     print(f"  {C.GREEN}Your WhatsApp API credentials are configured and verified.")
     print(f"  Next steps:")
-    print(f"    1. Deploy to Cloud Run (see DEPLOY.md)")
-    print(f"    2. Set your Cloud Run URL as the webhook callback in Meta Developer Console")
+    print(f"    1. Deploy to App Engine (see DEPLOY.md)")
+    print(f"    2. Set your App Engine URL as the webhook callback in Meta Developer Console")
     print(f"    3. Subscribe to 'messages' webhook field")
     print(f"    4. Send a message to the business number to trigger the bot!{C.END}\n")
 

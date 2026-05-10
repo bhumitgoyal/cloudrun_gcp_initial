@@ -1,7 +1,11 @@
 """
 bot/pipeline.py
 Orchestrates the full message handling flow:
-  WhatsApp in → Filter → Dedup → Firestore → Cache? → RAG → Gemini → Cache store → Firestore → WhatsApp out
+  Input → Filter → Dedup → Firestore → Cache? → RAG → Gemini → Cache store → Firestore → Output
+
+Supports two channels:
+  - WhatsApp: receives Meta webhook payloads, replies via WhatsApp Cloud API
+  - In-App:   receives direct API calls, returns BotResponse to the caller
 
 Also handles:
   - Message filtering (blocks links, social media forwards, emoji-only, greetings)
@@ -11,6 +15,7 @@ Also handles:
 """
 
 import os
+import uuid
 import logging
 import asyncio
 from typing import Optional
@@ -38,11 +43,11 @@ class MessagePipeline:
 
     def __init__(
         self,
-        whatsapp:      WhatsAppClient,
-        rag:           RAGEngine,
-        memory:        ConversationMemory,
-        llm:           GeminiChat,
-        cache:         RAGCache,
+        whatsapp:      WhatsAppClient = None,
+        rag:           RAGEngine      = None,
+        memory:        ConversationMemory = None,
+        llm:           GeminiChat     = None,
+        cache:         RAGCache       = None,
         evaluator:     OutputValidator  = None,
         sheets_logger: SheetsAuditLogger = None,
         kb_insights:   KBInsightsGenerator = None,
@@ -59,7 +64,9 @@ class MessagePipeline:
         self.kb_manager    = kb_manager
         self.moderator     = HinglishModerator()
 
-    # ── Entry point called by FastAPI background task ─────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    #  WHATSAPP ENTRY POINT (existing behaviour, unchanged)
+    # ══════════════════════════════════════════════════════════════════════════
 
     async def handle(self, payload: dict):
         """
@@ -67,13 +74,53 @@ class MessagePipeline:
         Any uncaught exception is logged but not re-raised (background task).
         """
         try:
-            await self._process(payload)
+            await self._process_whatsapp(payload)
         except Exception as exc:
             logger.error("Unhandled pipeline error: %s", exc, exc_info=True)
 
-    # ── Main flow ─────────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════════════
+    #  IN-APP ENTRY POINT (new)
+    # ══════════════════════════════════════════════════════════════════════════
 
-    async def _process(self, payload: dict):
+    async def handle_app_message(
+        self,
+        user_id:      str,
+        display_name: str,
+        text:         str,
+        message_id:   str = None,
+    ) -> Optional[BotResponse]:
+        """
+        Process a message from the in-app chatbot.
+        Returns the BotResponse directly (answer + escalation flag).
+        Returns None if the message was filtered or deduplicated.
+        """
+        if not message_id:
+            message_id = str(uuid.uuid4())
+
+        try:
+            return await self._process_core(
+                user_id=user_id,
+                display_name=display_name,
+                text=text,
+                message_id=message_id,
+                channel="app",
+            )
+        except Exception as exc:
+            logger.error("Unhandled app pipeline error: %s", exc, exc_info=True)
+            return BotResponse(
+                answer="I'm having a little trouble right now. Please try again in a moment.",
+                escalation=False,
+            )
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  WHATSAPP-SPECIFIC FLOW
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _process_whatsapp(self, payload: dict):
+        """
+        WhatsApp-specific wrapper: parses the webhook payload, handles admin
+        commands, then delegates to _process_core for the shared brain logic.
+        """
         # 1. Parse
         msg: Optional[IncomingMessage] = self.wa.parse_message(payload)
         if msg is None:
@@ -82,82 +129,156 @@ class MessagePipeline:
         admin_phone = os.environ.get("ADMIN_PHONE_NUMBER")
 
         # 1.5 Admin Override & Insights Logic
-        is_hardcoded_admin = msg.from_number in ("919818646823", "+919818646823")
+        is_admin = msg.from_number in ("919818646823", "+919818646823") or (admin_phone and msg.from_number == admin_phone)
         
-        if is_hardcoded_admin and msg.text.strip().lower() == "insights":
-            await self.wa.send_text(
-                to=msg.from_number,
-                body="⏳ Generating KB Insights... This may take a minute.",
-                phone_number_id=msg.phone_number_id
-            )
-            asyncio.create_task(self._run_insights_generator(msg))
-            return
-            
-        if admin_phone and msg.from_number == admin_phone:
-            if msg.text.startswith("/resolve "):
+        if is_admin:
+            if msg.text.strip().lower() == "insights":
+                await self.wa.send_text(
+                    to=msg.from_number,
+                    body="⏳ Generating KB Insights... This may take a minute.",
+                    phone_number_id=msg.phone_number_id
+                )
+                asyncio.create_task(self._run_insights_generator(msg))
+            elif msg.text.startswith("/resolve "):
                 target_phone = msg.text.split(" ")[1].strip()
                 await self.memory.set_escalation_status(target_phone, False)
                 await self.wa.send_text(
-                    to=admin_phone, 
+                    to=msg.from_number, 
                     body=f"✅ Resolved escalation for {target_phone}. Bot is back in control.",
                     phone_number_id=msg.phone_number_id
                 )
-            elif msg.text.startswith("/update_kb "):
-                await self.wa.send_text(
-                    to=admin_phone, 
-                    body="⏳ Processing your KB update request with Gemini... Please wait.",
-                    phone_number_id=msg.phone_number_id
-                )
-                asyncio.create_task(self._handle_update_kb(msg))
+            elif msg.text.startswith("/update_kb"):
+                admin_input = msg.text[len("/update_kb"):].strip()
+                if not admin_input:
+                    await self.wa.send_text(
+                        to=msg.from_number,
+                        body="⚠️ Please include your update instructions.\n\nUsage: `/update_kb <your instructions>`\nExample: `/update_kb We are launching a new Platinum Membership for ₹5000/year.`",
+                        phone_number_id=msg.phone_number_id
+                    )
+                else:
+                    await self.wa.send_text(
+                        to=msg.from_number, 
+                        body="⏳ Processing your KB update request with Gemini... Please wait.",
+                        phone_number_id=msg.phone_number_id
+                    )
+                    asyncio.create_task(self._handle_update_kb(msg))
             elif msg.text.strip().lower() == "/approve_kb":
                 await self.wa.send_text(
-                    to=admin_phone, 
+                    to=msg.from_number, 
                     body="⏳ Approving update and syncing to Vertex AI... Please wait.",
                     phone_number_id=msg.phone_number_id
                 )
                 asyncio.create_task(self._handle_approve_kb(msg))
+            elif msg.text.strip().lower() == "/insights_update":
+                await self.wa.send_text(
+                    to=msg.from_number,
+                    body="⏳ Fetching latest insights and applying to Knowledge Base... Please wait.",
+                    phone_number_id=msg.phone_number_id
+                )
+                asyncio.create_task(self._handle_insights_update(msg))
             else:
                 await self.wa.send_text(
-                    to=admin_phone,
-                    body="Hello Admin! The bot ignores normal messages from you. Use `/resolve <PHONE_NUMBER>` to unpause a user.",
+                    to=msg.from_number,
+                    body=(
+                        "Hello Admin! Here are the available commands:\n\n"
+                        "📝 `/update_kb <instructions>` — Update the Knowledge Base\n"
+                        "✅ `/approve_kb` — Approve & sync KB draft to Vertex AI\n"
+                        "🔓 `/resolve <PHONE>` — Unpause bot for a user\n"
+                        "📊 `insights` — Generate KB improvement insights\n"
+                        "🚀 `/insights_update` — Auto-update KB from latest insights\n\n"
+                        "Any other message from you is ignored by the bot."
+                    ),
                     phone_number_id=msg.phone_number_id
                 )
             return
 
-        # 2. Deduplicate
-        if msg.wa_message_id in _SEEN_IDS:
-            logger.info("Duplicate message %s — skipping.", msg.wa_message_id)
-            return
-        _SEEN_IDS.add(msg.wa_message_id)
+        # Mark message as read (WhatsApp-specific)
+        asyncio.create_task(self.wa.mark_as_read(msg.wa_message_id, msg.phone_number_id))
+
+        # Show typing indicator (WhatsApp-specific)
+        asyncio.create_task(self.wa.send_typing_indicator(msg.from_number, msg.phone_number_id))
+
+        # Delegate to core pipeline
+        bot_response = await self._process_core(
+            user_id=msg.from_number,
+            display_name=msg.display_name,
+            text=msg.text,
+            message_id=msg.wa_message_id,
+            channel="whatsapp",
+            phone_number_id=msg.phone_number_id,
+            bot_phone_number=msg.bot_phone_number,
+        )
+
+        if bot_response is None:
+            return  # Filtered / deduped / escalated-to-human
+
+        # Send reply via WhatsApp
+        sent = await self.wa.send_text(
+            to             = msg.from_number,
+            body           = bot_response.answer,
+            phone_number_id= msg.phone_number_id,
+        )
+        if not sent:
+            logger.error("Failed to deliver message to %s", msg.from_number)
+
+    # ══════════════════════════════════════════════════════════════════════════
+    #  SHARED CORE PIPELINE (channel-agnostic brain)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _process_core(
+        self,
+        user_id:           str,
+        display_name:      str,
+        text:              str,
+        message_id:        str,
+        channel:           str,            # "whatsapp" or "app"
+        phone_number_id:   str = None,     # WhatsApp-only
+        bot_phone_number:  str = None,     # WhatsApp-only
+    ) -> Optional[BotResponse]:
+        """
+        Shared pipeline logic used by both WhatsApp and in-app channels.
+        Returns a BotResponse, or None if the message should be silently dropped.
+        """
+        # 1. Deduplicate
+        if message_id in _SEEN_IDS:
+            logger.info("Duplicate message %s — skipping.", message_id)
+            return None
+        _SEEN_IDS.add(message_id)
         if len(_SEEN_IDS) > _SEEN_MAX:
             _SEEN_IDS.pop()
 
-        # Mark message as read
-        asyncio.create_task(self.wa.mark_as_read(msg.wa_message_id, msg.phone_number_id))
-
-        # 2.5 Filter out junk messages (links, forwards, emojis, greetings)
-        filter_result = filter_message(msg.text)
+        # 2. Filter out junk messages (links, forwards, emojis, greetings)
+        filter_result = filter_message(text)
         if not filter_result.is_actionable:
             logger.info(
                 "Filtered out message from %s: %s — %.80s",
-                msg.from_number, filter_result.reason, msg.text,
+                user_id, filter_result.reason, text,
             )
-            return
+            return None
 
-        logger.info("Processing message from %s: %.80s", msg.from_number, msg.text)
-        
-        # Show typing indicator to user
-        asyncio.create_task(self.wa.send_typing_indicator(msg.from_number, msg.phone_number_id))
+        logger.info("[%s] Processing message from %s: %.80s", channel, user_id, text)
 
         # 3. Load conversation state from Firestore
-        state = await self.memory.get_state(msg.from_number)
+        state = await self.memory.get_state(user_id)
 
         if state.get("escalated_to_human", False):
-            logger.info("Ignoring message from %s, currently escalated to human.", msg.from_number)
-            return
+            last_seen = state.get("last_seen")
+            if last_seen:
+                from datetime import datetime, timezone
+                now = datetime.now(timezone.utc)
+                if (now - last_seen).total_seconds() > 30 * 60:
+                    logger.info("User %s was escalated but 30 mins have passed. Auto-unpausing.", user_id)
+                    await self.memory.set_escalation_status(user_id, False)
+                    state["escalated_to_human"] = False
+                else:
+                    logger.info("Ignoring message from %s, currently escalated to human.", user_id)
+                    return None
+            else:
+                logger.info("Ignoring message from %s, currently escalated to human.", user_id)
+                return None
 
         # 3.4 Indic-aware Input Moderation
-        mod_result = await self.moderator.analyze_message(msg.text)
+        mod_result = await self.moderator.analyze_message(text)
         logger.info("Moderation input result: %s", mod_result)
         
         severity = mod_result.get("severity", "none")
@@ -166,19 +287,28 @@ class MessagePipeline:
                 answer="Your message violates our community guidelines. An admin will review this conversation.",
                 escalation=True
             )
-            await self.wa.send_text(to=msg.from_number, body=bot_response.answer, phone_number_id=msg.phone_number_id)
-            await self._handle_escalation(msg, bot_response, state)
-            return
+            # Escalation handling
+            await self._handle_escalation_generic(
+                user_id=user_id,
+                display_name=display_name,
+                text=text,
+                bot_response=bot_response,
+                state=state,
+                channel=channel,
+                phone_number_id=phone_number_id,
+                bot_phone_number=bot_phone_number,
+            )
+            return bot_response
             
         is_frustrated = (severity == "frustration")
         if severity in ["conversational", "frustration"]:
             # Override text to remove filler profanity so RAG/LLM isn't distracted
-            msg.text = mod_result.get("stripped_text", msg.text)
+            text = mod_result.get("stripped_text", text)
 
         # 3.5 Polish query for better RAG retrieval
-        polished_query = await self.llm.rewrite_query(msg.text)
+        polished_query = await self.llm.rewrite_query(text)
         if not polished_query:
-            polished_query = msg.text # Fallback to original text if the LLM completely stripped a greeting
+            polished_query = text # Fallback to original text if the LLM completely stripped a greeting
         logger.info("Polished query: %s", polished_query)
 
         # ── 3.7 Semantic cache check ─────────────────────────────────────────
@@ -204,7 +334,7 @@ class MessagePipeline:
         bot_response: BotResponse = await self.llm.chat(
             customer_summary     = customer_summary,
             conversation_history = conversation_history,
-            user_query           = msg.text,
+            user_query           = text,
             retrieved_context    = retrieved_context,
             is_frustrated        = is_frustrated,
         )
@@ -223,81 +353,102 @@ class MessagePipeline:
         #     "escalation": bot_response.escalation,
         # })
 
-        # 7. Send reply to user
-        sent = await self.wa.send_text(
-            to             = msg.from_number,
-            body           = bot_response.answer,
-            phone_number_id= msg.phone_number_id,
-        )
-        if not sent:
-            logger.error("Failed to deliver message to %s", msg.from_number)
-
-        # 7.5 Quality audit (async, doesn't block the reply)
+        # 7. Quality audit (async, doesn't block the reply)
         if self.evaluator and self.sheets_logger:
             asyncio.create_task(
-                self._evaluate_and_log(
-                    msg, polished_query, bot_response, retrieved_context
+                self._evaluate_and_log_generic(
+                    user_id=user_id,
+                    original_text=text,
+                    message_id=message_id,
+                    polished_query=polished_query,
+                    bot_response=bot_response,
+                    retrieved_context=retrieved_context,
                 )
             )
 
         # 8. Persist turn to Firestore
         updated_state = await self.memory.append_turn(
-            phone        = msg.from_number,
-            display_name = msg.display_name,
-            user_text    = msg.text,
+            phone        = user_id,
+            display_name = display_name,
+            user_text    = text,
             bot_text     = bot_response.answer,
         )
 
         # 9. Escalation handling
         if bot_response.escalation:
-            await self._handle_escalation(msg, bot_response, state)
+            await self._handle_escalation_generic(
+                user_id=user_id,
+                display_name=display_name,
+                text=text,
+                bot_response=bot_response,
+                state=state,
+                channel=channel,
+                phone_number_id=phone_number_id,
+                bot_phone_number=bot_phone_number,
+            )
 
         # 10. Rolling summary compression (async, doesn't block the reply)
         if self.memory.should_summarise(updated_state):
             asyncio.create_task(
-                self._compress_summary(msg.from_number, updated_state)
+                self._compress_summary(user_id, updated_state)
             )
 
-    # ── Escalation ────────────────────────────────────────────────────────────
+        return bot_response
 
-    async def _handle_escalation(
+    # ══════════════════════════════════════════════════════════════════════════
+    #  ESCALATION (channel-aware)
+    # ══════════════════════════════════════════════════════════════════════════
+
+    async def _handle_escalation_generic(
         self,
-        msg:          IncomingMessage,
-        bot_response: BotResponse,
-        state:        dict,
+        user_id:          str,
+        display_name:     str,
+        text:             str,
+        bot_response:     BotResponse,
+        state:            dict,
+        channel:          str,
+        phone_number_id:  str = None,
+        bot_phone_number: str = None,
     ):
         """
         Called when the bot flags a conversation for human review.
+        Works for both WhatsApp and in-app channels.
         """
         logger.warning(
-            "ESCALATION REQUIRED | phone=%s | name=%s | query=%s | turn=%d",
-            msg.from_number,
-            msg.display_name,
-            msg.text[:120],
+            "ESCALATION REQUIRED | channel=%s | user=%s | name=%s | query=%s | turn=%d",
+            channel,
+            user_id,
+            display_name,
+            text[:120],
             state.get("turn_count", 0),
         )
         
         # 1. Pause the bot for this user
-        await self.memory.set_escalation_status(msg.from_number, True)
+        await self.memory.set_escalation_status(user_id, True)
 
-        # 2. Alert the Admin via WhatsApp
+        # 2. Alert the Admin via WhatsApp (admin always uses WhatsApp)
         admin_phone = os.environ.get("ADMIN_PHONE_NUMBER")
-        if admin_phone:
-            clean_bot_phone = "".join(filter(str.isdigit, msg.bot_phone_number))
-            resolve_link = f"https://wa.me/{clean_bot_phone}?text=%2Fresolve%20{msg.from_number}"
+        if admin_phone and self.wa:
+            channel_label = "WhatsApp" if channel == "whatsapp" else "In-App"
+
+            if channel == "whatsapp" and bot_phone_number:
+                clean_bot_phone = "".join(filter(str.isdigit, bot_phone_number))
+                resolve_link = f"https://wa.me/{clean_bot_phone}?text=%2Fresolve%20{user_id}"
+            else:
+                resolve_link = f"(Send `/resolve {user_id}` to the bot via WhatsApp)"
 
             alert_text = (
-                f"🚨 *ESCALATION REQUIRED*\n"
-                f"User: {msg.display_name} ({msg.from_number})\n\n"
-                f"Issue: {msg.text}\n\n"
+                f"🚨 *ESCALATION REQUIRED* [{channel_label}]\n"
+                f"User: {display_name} ({user_id})\n\n"
+                f"Issue: {text}\n\n"
                 f"Bot replied: {bot_response.answer}\n\n"
-                f"Reply to them directly from your WhatsApp App. When finished, click the link below to unpause the bot for this user:\n"
+                f"To unpause the bot for this user:\n"
                 f"{resolve_link}"
             )
             await self.wa.send_text(
                 to=admin_phone,
                 body=alert_text,
-                phone_number_id=msg.phone_number_id
+                phone_number_id=phone_number_id or self.wa.phone_number_id,
             )
 
     # ── Rolling summary compression ───────────────────────────────────────────
@@ -335,26 +486,28 @@ Output only the summary text. No preamble. No bullet points.
         except Exception as exc:
             logger.error("Summary compression failed for %s: %s", phone, exc)
 
-    # ── Quality audit ────────────────────────────────────────────────────────
+    # ── Quality audit (channel-agnostic) ──────────────────────────────────────
     
-    async def _evaluate_and_log(
+    async def _evaluate_and_log_generic(
         self,
-        msg:               IncomingMessage,
+        user_id:           str,
+        original_text:     str,
+        message_id:        str,
         polished_query:    str,
         bot_response:      BotResponse,
         retrieved_context: str,
     ):
         """
         Runs the Gemini grader on the bot's response and appends to Google Sheets.
-        This entire task is fire-and-forget.
+        This entire task is fire-and-forget. Works for both channels.
         """
         import datetime
         
-        logger.info("Starting background quality audit for %s...", msg.from_number)
+        logger.info("Starting background quality audit for %s...", user_id)
         
         # 1. Run LLM evaluation
         result = await self.evaluator.evaluate(
-            original_query=msg.text,
+            original_query=original_text,
             polished_query=polished_query,
             bot_answer=bot_response.answer,
             retrieved_context=retrieved_context,
@@ -368,8 +521,8 @@ Output only the summary text. No preamble. No bullet points.
         
         await self.sheets_logger.log_to_audit_sheet(
             timestamp=timestamp,
-            phone=msg.from_number,
-            original_query=msg.text,
+            phone=user_id,
+            original_query=original_text,
             polished_query=polished_query,
             bot_answer=bot_response.answer,
             accuracy=result.accuracy_score,
@@ -377,7 +530,26 @@ Output only the summary text. No preamble. No bullet points.
             escalation=result.required_escalation,
             empathy=result.empathy_score,
             reasoning=result.reasoning,
+            message_id=message_id,
+        )
+
+    # ── Legacy quality audit wrapper (kept for backward compatibility) ────────
+    
+    async def _evaluate_and_log(
+        self,
+        msg:               IncomingMessage,
+        polished_query:    str,
+        bot_response:      BotResponse,
+        retrieved_context: str,
+    ):
+        """Legacy wrapper that delegates to the channel-agnostic version."""
+        await self._evaluate_and_log_generic(
+            user_id=msg.from_number,
+            original_text=msg.text,
             message_id=msg.wa_message_id,
+            polished_query=polished_query,
+            bot_response=bot_response,
+            retrieved_context=retrieved_context,
         )
 
     # ── KB Insights Trigger ──────────────────────────────────────────────────
@@ -454,3 +626,72 @@ Output only the summary text. No preamble. No bullet points.
                 phone_number_id=msg.phone_number_id
             )
 
+    async def _handle_insights_update(self, msg: IncomingMessage):
+        if not self.kb_insights or not self.kb_manager:
+            await self.wa.send_text(
+                to=msg.from_number,
+                body="❌ KB Insights or KB Manager not initialised.",
+                phone_number_id=msg.phone_number_id
+            )
+            return
+
+        try:
+            insight_text = await self.kb_insights.get_latest_insight()
+        except ValueError as e:
+            await self.wa.send_text(
+                to=msg.from_number,
+                body=f"❌ No insights found: {e}",
+                phone_number_id=msg.phone_number_id
+            )
+            return
+        except Exception as e:
+            logger.error("Failed to fetch latest insight: %s", e, exc_info=True)
+            await self.wa.send_text(
+                to=msg.from_number,
+                body=f"❌ Failed to read insights sheet: {e}",
+                phone_number_id=msg.phone_number_id
+            )
+            return
+
+        try:
+            update_instruction = (
+                "Based on the following insights from analyzing recent customer conversations, "
+                "update the knowledge base to address the identified gaps. "
+                "Add any missing facts, policies, or instructions suggested below. "
+                "Do NOT remove any existing content unless it directly contradicts the insight.\n\n"
+                f"INSIGHTS:\n{insight_text}"
+            )
+            new_kb = await self.kb_manager.generate_update(update_instruction)
+        except Exception as e:
+            logger.error("Gemini KB update generation failed: %s", e, exc_info=True)
+            await self.wa.send_text(
+                to=msg.from_number,
+                body=f"❌ Failed to generate KB update: {e}",
+                phone_number_id=msg.phone_number_id
+            )
+            return
+
+        try:
+            await self.kb_manager.save_pending_update(new_kb)
+            success = await self.kb_manager.approve_and_sync()
+        except Exception as e:
+            logger.error("RAG sync failed: %s", e, exc_info=True)
+            await self.wa.send_text(
+                to=msg.from_number,
+                body=f"❌ Failed to sync to RAG: {e}",
+                phone_number_id=msg.phone_number_id
+            )
+            return
+
+        if success:
+            await self.wa.send_text(
+                to=msg.from_number,
+                body="✅ Knowledge base successfully updated from latest insights and synced to RAG.",
+                phone_number_id=msg.phone_number_id
+            )
+        else:
+            await self.wa.send_text(
+                to=msg.from_number,
+                body="❌ RAG sync returned failure. Check server logs.",
+                phone_number_id=msg.phone_number_id
+            )

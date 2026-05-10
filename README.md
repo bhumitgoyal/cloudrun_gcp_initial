@@ -1,48 +1,52 @@
-# GoHappy Club — WhatsApp AI Support Bot
+# GoHappy Club — AI Support Bot (WhatsApp + In-App)
 
-An intelligent WhatsApp chatbot for **GoHappy Club**, India's senior community platform for people aged 50+. The bot answers member queries about sessions, memberships, Happy Coins, trips, and more — powered by Vertex AI RAG and Gemini 2.5 Flash, backed by Firestore for conversation memory, and deployed fully serverless on Google App Engine Standard.
+An intelligent customer support chatbot for **GoHappy Club**, India's senior community platform for people aged 50+. The bot answers member queries about sessions, memberships, Happy Coins, trips, and more — powered by Vertex AI RAG and Gemini 2.5 Flash, backed by Firestore for conversation memory, and deployed fully serverless on Google App Engine Standard.
+
+**Dual-channel:** The same AI brain serves both **WhatsApp** (via Meta webhook) and your **mobile/web app** (via REST API).
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────┐
-│  WhatsApp User   │
-│  (Senior Citizen)│
-└────────┬─────────┘
-         │ sends message
-         ▼
-┌──────────────────────────────────┐
-│  Meta WhatsApp Business API      │
-│  POST /webhook                   │
-└────────┬─────────────────────────┘
-         │
-         ▼
+┌──────────────────┐     ┌──────────────────┐
+│  WhatsApp User   │     │  App User        │
+│  (Senior Citizen)│     │  (Mobile / Web)  │
+└────────┬─────────┘     └────────┬─────────┘
+         │ sends message          │ POST /api/chat
+         ▼                        ▼
+┌────────────────────┐   ┌────────────────────┐
+│ Meta WhatsApp API  │   │ In-App REST API    │
+│ POST /webhook      │   │ POST /api/chat     │
+└────────┬───────────┘   └────────┬───────────┘
+         │                        │
+         └───────────┬────────────┘
+                     ▼
 ┌──────────────────────────────────────────────────────────────┐
-│  App Engine  (FastAPI)                                       │
+│  App Engine  (FastAPI) — Shared Core Pipeline                │
 │                                                              │
-│  1. Parse & deduplicate incoming message                     │
+│  1. Deduplicate incoming message                             │
 │  2. Filter junk (links, social media, emojis, greetings)     │
 │  3. Load conversation state from Firestore                   │
-│  4. Rewrite user query (Gemini — handles Hinglish/typos)     │
-│  5. Semantic cache check (in-memory cosine similarity)       │
-│     ├── HIT → skip steps 6–7, serve cached answer            │
-│     └── MISS → continue                                      │
+│  4. Indic-aware input moderation                             │
+│  5. Rewrite user query (Gemini — handles Hinglish/typos)     │
 │  6. Retrieve relevant knowledge chunks (Vertex AI RAG)       │
 │  7. Generate response (Gemini — structured JSON output)      │
-│  8. Store response in cache (skip if escalation)             │
-│  9. Send reply via WhatsApp Business API                     │
+│  8. Output moderation (RAG leakage protection)               │
+│  9. Quality audit (async, fire-and-forget)                   │
 │ 10. Persist turn to Firestore                                │
 │ 11. Escalate to human admin if needed                        │
 │ 12. Compress rolling summary when threshold is hit           │
 │                                                              │
 │  Endpoints:                                                  │
-│    GET  /webhook            — Meta webhook verification      │
-│    POST /webhook            — Incoming messages              │
-│    GET  /health             — Health check                   │
-│    GET  /cache/stats        — Cache hit/miss counters        │
-│    POST /cache/invalidate   — Flush all cached entries       │
+│    GET  /webhook                — Meta webhook verification  │
+│    POST /webhook                — Incoming WhatsApp messages │
+│    POST /api/chat               — In-app chat (sync reply)   │
+│    GET  /api/chat/history/{id}  — Conversation history       │
+│    GET  /health                 — Health check               │
+│    GET  /cache/stats            — Cache hit/miss counters    │
+│    POST /cache/invalidate       — Flush all cached entries   │
+│    POST /insights_update        — Auto-update KB from insights│
 └──────────────────────────────────────────────────────────────┘
          │                    │                    │
          ▼                    ▼                    ▼
@@ -62,13 +66,13 @@ This project runs entirely on serverless/managed GCP services. **No VMs, no Redi
 
 | Service | Purpose | Required? |
 |---------|---------|-----------|
-| **App Engine** | Hosts the FastAPI app | ✅ Yes |
+| **App Engine** | Hosts the FastAPI app (Standard, Python 3.11) | ✅ Yes |
 | **Vertex AI (Gemini 2.5 Flash)** | Query rewrite, answer generation, summary compression | ✅ Yes |
 | **Vertex AI RAG Engine** | Knowledge retrieval from your document corpus | ✅ Yes |
 | **Cloud Firestore** | Conversation memory (per-user state) | ✅ Yes |
 | **Secret Manager** | Stores WhatsApp API tokens securely | ✅ Yes |
-| **Cloud Build** | Builds Docker container on deploy | ✅ Yes |
-| **Artifact Registry** | Stores the built Docker image | ✅ Yes |
+| ~~Cloud Build~~ | ~~Docker container builds~~ | ❌ Not needed (App Engine deploys from source) |
+| ~~Artifact Registry~~ | ~~Docker image storage~~ | ❌ Not needed |
 | ~~Redis / Memorystore~~ | ~~Cache backend~~ | ❌ Not needed |
 | ~~Compute Engine~~ | ~~Any VM~~ | ❌ Not needed |
 | ~~VPC Connector~~ | ~~Network bridge~~ | ❌ Not needed |
@@ -79,31 +83,39 @@ This project runs entirely on serverless/managed GCP services. **No VMs, no Redi
 
 ```
 cloudrun_gcp_initial/
-├── main.py                  # FastAPI app — webhook + cache + health endpoints
+├── main.py                           # FastAPI app — webhook + in-app chat + insights update + cache + health
+├── gohappy_club_knowledge_base.md    # Structured Q&A knowledge base (uploaded to Vertex AI RAG)
 ├── bot/
 │   ├── __init__.py
-│   ├── whatsapp.py          # WhatsApp Cloud API client (send/receive)
-│   ├── rag.py               # Vertex AI RAG Engine retrieval wrapper
-│   ├── memory.py            # Firestore-backed conversation state manager
-│   ├── llm.py               # Gemini prompt engineering + JSON output parser
-│   ├── pipeline.py          # Orchestrates the full message handling flow
-│   ├── rag_cache.py         # Serverless in-memory semantic cache
-│   └── message_filter.py    # Filters links, social media, emojis, greetings
-├── .env                     # Environment variables (local dev only)
-├── requirements.txt         # Python dependencies
-├── app.yaml                 # App Engine configuration
-├── DEPLOY.md                # Step-by-step GCP deployment guide
-├── run_dev.sh               # Local dev launcher (cloudflared tunnel)
-├── run.sh                   # Simple launcher with ngrok
+│   ├── whatsapp.py                   # WhatsApp Cloud API client (send/receive)
+│   ├── rag.py                        # Vertex AI RAG Engine retrieval wrapper
+│   ├── memory.py                     # Firestore-backed conversation state manager
+│   ├── llm.py                        # Gemini prompt engineering + JSON output parser
+│   ├── pipeline.py                   # Dual-channel message pipeline (WhatsApp + In-App)
+│   ├── moderation.py                 # Indic-aware Hinglish tone/abuse classifier (scope: profanity only)
+│   ├── evaluator.py                  # Post-response quality audit (Gemini grader with name hallucination checks)
+│   ├── sheets_logger.py              # Google Sheets audit trail logger
+│   ├── rag_cache.py                  # Serverless in-memory semantic cache
+│   ├── message_filter.py             # Filters links, social media, emojis, greetings
+│   ├── kb_manager.py                 # Knowledge base update automation
+│   └── kb_insights.py                # KB improvement insights generator + latest insight fetcher
+├── .env                              # Environment variables (local dev only)
+├── requirements.txt                  # Python dependencies
+├── app.yaml                          # App Engine configuration
+├── DEPLOY.md                         # Step-by-step GCP deployment guide
+├── run_dev.sh                        # Local dev launcher (cloudflared tunnel)
+├── run.sh                            # Simple launcher with ngrok
 ├── Test/
-│   ├── test_rag_cache.py        # Cache + filter tests
-│   ├── test_cache_pipeline.py   # End-to-end pipeline integration tests
-│   ├── test_pipeline.py         # Pipeline unit tests
-│   ├── test_rag.py              # RAG retrieval test
-│   ├── test_bad_queries.py      # Query rewriter test (Hinglish, typos, shortforms)
-│   ├── test_send_receive.py     # End-to-end WhatsApp API test
-│   ├── test_kb_insights.py      # KB Insights mock test
-│   └── test_full_simulation.py  # Full conversation simulation test
+│   ├── test_app_chat.py              # In-app chat + insights_update API tests (15 tests)
+│   ├── test_rag_cache.py             # Cache + filter tests (17 tests)
+│   ├── test_cache_pipeline.py        # End-to-end pipeline integration tests (18 tests)
+│   ├── test_pipeline.py              # Pipeline unit tests
+│   ├── test_rag.py                   # RAG retrieval test
+│   ├── test_bad_queries.py           # Query rewriter test (Hinglish, typos, shortforms)
+│   ├── test_send_receive.py          # End-to-end WhatsApp API test
+│   ├── test_kb_insights.py           # KB Insights mock test
+│   ├── test_full_simulation.py       # Full conversation simulation test
+│   └── sync_kb_to_rag.py             # One-shot utility to sync KB file to Vertex AI RAG
 ```
 
 ---
@@ -112,17 +124,20 @@ cloudrun_gcp_initial/
 
 ### `main.py` — Application Entry Point
 
-FastAPI application with five endpoints:
+FastAPI application with dual-channel endpoints and admin tooling:
 
 | Endpoint | Method | Purpose |
 |----------|--------|---------|
 | `/webhook` | `GET` | One-time Meta webhook verification (responds with `hub.challenge`) |
 | `/webhook` | `POST` | Receives all incoming WhatsApp messages; responds `200` immediately and processes in a background task |
+| **`/api/chat`** | **`POST`** | **In-app chatbot — send a message, get the bot’s reply synchronously** |
+| **`/api/chat/history/{user_id}`** | **`GET`** | **Retrieve conversation history for the app chat UI** |
 | `/health` | `GET` | Health check — returns `{"status": "ok"}` |
 | `/cache/stats` | `GET` | Cache hit/miss counters, hit rate, and total cached entries |
 | `/cache/invalidate` | `POST` | Flush all cached entries (admin use) |
+| **`/insights_update`** | **`POST`** | **One-click KB update: reads latest insights from Google Sheets → Gemini applies them to the KB → syncs to RAG** |
 
-On startup, initialises the `MessagePipeline` with all dependencies (WhatsApp client, RAG engine, Firestore memory, Gemini LLM, semantic cache).
+On startup, initialises the `MessagePipeline` with all dependencies (WhatsApp client, RAG engine, Firestore memory, Gemini LLM, semantic cache). CORS middleware is enabled for mobile/web app clients.
 
 ---
 
@@ -150,17 +165,15 @@ Filters out non-actionable messages **before** they enter the pipeline, saving G
 Intercepts after query rewriting, before Vertex AI RAG retrieval. Caches responses for semantically identical queries.
 
 **How it works:**
-1. Embeds the strictly normalized query into a 384-dimensional vector using `all-MiniLM-L6-v2`
-2. Cosine similarity search against all cached entries
-3. If similarity ≥ 0.75 → **HIT** — return cached response, skip RAG + Gemini
-4. If below threshold → **MISS** — run full pipeline, cache the result
+1. Exact string match search against all cached entries using the rewritten query
+2. If match found → **HIT** — return cached response, skip RAG + Gemini
+3. If not found → **MISS** — run full pipeline, cache the result
 
 **Key properties:**
-- **No external dependencies** — runs entirely in Cloud Run process memory
-- **Max 1,000 entries** (~2.5 MB total — negligible for 2 GiB Cloud Run)
+- **No external dependencies** — runs entirely in App Engine process memory
+- **Max 1,000 entries** (~1 MB total — negligible for App Engine)
 - **TTL: 24 hours** — entries auto-expire so knowledge updates propagate
 - **Escalation-safe** — responses with `escalation: true` are never cached
-- **Lazy model loading** — embedding model loads on first cache use, not at startup
 
 **Configuration** (env vars):
 
@@ -226,16 +239,18 @@ Intercepts after query rewriting, before Vertex AI RAG retrieval. Caches respons
   | Instance | Purpose |
   |----------|---------|
   | `self.model` | Main chat — generates customer support replies with structured JSON output |
-  | `self.rewrite_model` | Canonical Normalizer — rewrites broken English and Hinglish into strict, identical standard English queries (e.g., 'membership kaise lu' → 'How do I join GoHappy Club?'). This fuels the 70%+ hit rate of the semantic cache. |
+  | `self.rewrite_model` | Canonical Normalizer — rewrites broken English and Hinglish into standard English queries (20+ canonical rewrites) |
   | `self.summary_model` | Conversation compressor — generates rolling summaries |
 
-- **System Prompt** — a detailed, production-grade prompt baked into the module as `SYSTEM_PROMPT`. Includes:
-  - Role & identity (GoHappy Club support agent)
-  - Full company context (plans, pricing, policies, contact info)
-  - Structured response instructions (understand → evaluate → answer / reject / escalate)
-  - Tone rules (warm, concise, English-only, no filler, max 1 emoji)
-  - Strict Guardrails & Anti-Hallucination (SILENT REJECT on trivia, ESCALATE gracefully if answers are missing without making things up)
-  - Strict JSON output schema: `{"answer": "...", "escalation": true/false}`
+- **System Prompt** — a comprehensive, production-grade prompt baked into the module as `SYSTEM_PROMPT` (~13K chars). Includes:
+  - **Role & Identity** — GoHappy Club customer support assistant persona
+  - **Company Context** — platform overview, direct app download URLs (Apple App Store & Google Play Store), key offerings, support hours
+  - **Response Instructions** — HANDLE_GREETING, REJECT (with 10+ explicit categories: biodata, matrimonial, political, chain messages, personal tasks, etc.), ANSWER, ESCALATE
+  - **Tone & Style Rules** — senior-friendly language, no jargon, name fabrication prohibition, app onboarding patience
+  - **Key Policies & Guardrails** — member privacy, session recording access tiers, app onboarding guidance, trip discount coupon rules
+  - **Strict JSON Output Schema** — `{answer, escalation}` format
+
+- **Query Rewrite Prompt** — 20+ canonical rewrite examples covering memberships, Happy Coins, recordings, referrals, login/OTP, language change, payments, refunds, and greeting+question combos.
 
 - **Output Parsing** — enforces JSON output via Gemini's `response_mime_type="application/json"` and a response schema. Falls back to best-effort text extraction if parsing fails.
 
@@ -243,67 +258,108 @@ Intercepts after query rewriting, before Vertex AI RAG retrieval. Caches respons
 
 ---
 
-### `bot/pipeline.py` — Message Pipeline Orchestrator
+### `bot/pipeline.py` — Dual-Channel Message Pipeline
 
-The core orchestration layer. Handles the full lifecycle of an incoming message:
+The core orchestration layer. Supports both **WhatsApp** and **In-App** channels through a shared core pipeline.
 
-```
-Incoming Webhook
-      │
-      ▼
-Parse message (skip non-text, images, status updates)
-      │
-      ▼
-Admin override check (/resolve <PHONE>)
-      │
-      ▼
-Deduplication (in-memory set, last 500 IDs)
-      │
-      ▼
-Message filter (block links, social media, emojis, greetings)
-      │
-      ▼
-Load conversation state from Firestore
-      │
-      ▼
-Check escalation pause flag → skip if escalated
-      │
-      ▼
-Rewrite/polish user query (Gemini)
-      │
-      ▼
-Semantic cache check → serve cached response on HIT
-      │
-      ▼ (MISS only)
-RAG retrieval (Vertex AI)
-      │
-      ▼
-Build prompt → call Gemini → get JSON response
-      │
-      ▼
-Cache the response (skip if escalation)
-      │
-      ▼
-Send reply to user (WhatsApp API)
-      │
-      ▼
-Persist turn to Firestore
-      │
-      ▼
-Handle escalation if flagged
-      │
-      ▼
-Trigger rolling summary compression if due (async)
-```
+**Key methods:**
+
+| Method | Purpose |
+|--------|---------|
+| `handle(payload)` | WhatsApp entry point — parses webhook, handles admin commands, then delegates to core |
+| `handle_app_message(user_id, display_name, text, message_id)` | In-app entry point — returns `BotResponse` directly |
+| `_process_core(...)` | Shared brain — dedup, filter, moderation, RAG, Gemini, audit, persist |
 
 **Key features:**
 
+- **Dual-Channel** — the same AI pipeline serves both WhatsApp and in-app users. WhatsApp-specific I/O (typing indicators, mark-as-read, admin commands) only runs for WhatsApp messages.
 - **Message Filtering** — blocks links, social media URLs, emoji-only, and greeting-only messages before they consume any Gemini or RAG tokens.
-- **Semantic Caching** — identical and semantically similar queries return cached responses in <50ms, skipping RAG and Gemini entirely. Saves ~60-70% of per-message cost on hits.
-- **Deduplication** — Meta may deliver the same webhook multiple times. An in-memory set of the last 500 message IDs prevents duplicate processing.
-- **Admin Override** — the `ADMIN_PHONE_NUMBER` can send `/resolve <PHONE>` to unpause a user after a human support interaction.
-- **Escalation** — when Gemini flags `escalation: true`, the bot pauses itself for that user, sends the user an escalation message, and alerts the admin via WhatsApp with full context.
-- **Background Summary Compression** — when the turn count hits the threshold, kicks off a Gemini call to compress recent turns into a rolling summary (runs as an `asyncio` task, doesn't block the reply).
+- **Deduplication** — an in-memory set of the last 500 message IDs prevents duplicate processing.
+- **Admin Override** — the `ADMIN_PHONE_NUMBER` can send `/resolve <PHONE>` to unpause a user (WhatsApp-only).
+- **Escalation** — when Gemini flags `escalation: true`, the bot pauses itself for that user. On WhatsApp, it alerts the admin. On the app, the `escalation` flag is returned in the API response.
+- **Background Summary Compression** — compresses recent turns into a rolling summary every N turns (async, doesn't block the reply).
+
+
+---
+
+## In-App Chat API
+
+The in-app chat API lets your mobile or web application use the same AI chatbot that serves WhatsApp users. The bot processes messages synchronously and returns the reply in the HTTP response body.
+
+### `POST /api/chat` — Send a Message
+
+**Request:**
+
+```json
+{
+  "user_id": "firebase_uid_or_phone",
+  "display_name": "Ramesh Kumar",
+  "message": "What is GoHappy Club?",
+  "message_id": "optional-uuid-for-dedup"
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `user_id` | string | Yes | Stable user identifier (Firebase UID, phone number, or custom ID) |
+| `display_name` | string | No | User's name (default: `"App User"`) |
+| `message` | string | Yes | The chat message text |
+| `message_id` | string | No | Client-side dedup ID (auto-generated UUID if omitted) |
+
+**Response:**
+
+```json
+{
+  "reply": "GoHappy Club is India's senior community platform for people aged 50+. We offer daily live sessions, workshops, trips, and more!",
+  "escalation": false
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `reply` | string | Bot's reply text (empty if message was filtered) |
+| `escalation` | bool | `true` if the query was escalated to human support |
+
+**Example (curl):**
+
+```bash
+curl -X POST https://your-app.appspot.com/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "user_abc123",
+    "display_name": "Ramesh",
+    "message": "How do I join GoHappy Club?"
+  }'
+```
+
+### `GET /api/chat/history/{user_id}` — Conversation History
+
+Returns recent conversation turns for rendering in the app's chat UI.
+
+**Response:**
+
+```json
+{
+  "display_name": "Ramesh Kumar",
+  "turns": [
+    { "role": "user", "content": "What is GoHappy Club?", "ts": "2026-05-10T10:00:00Z" },
+    { "role": "assistant", "content": "GoHappy Club is India's senior community platform...", "ts": "2026-05-10T10:00:01Z" }
+  ],
+  "summary": "Ramesh asked about GoHappy Club membership options."
+}
+```
+
+### CORS Configuration
+
+CORS is enabled by default (all origins). To restrict origins in production, set the `CORS_ORIGINS` environment variable:
+
+```env
+CORS_ORIGINS=https://your-app.com,https://staging.your-app.com
+```
+
+### Conversation Merging
+
+If you use the same `user_id` as the WhatsApp phone number (e.g. `"919876543210"`), conversations will be **merged** across both channels — the app user will see their WhatsApp history and vice versa. Use a different ID scheme (e.g. Firebase UID) for separate threads.
 
 ---
 
@@ -361,6 +417,9 @@ PORT=8080
 FIRESTORE_DB=(default)
 MAX_RECENT_TURNS=10
 SUMMARISE_EVERY=6
+
+# In-App Chat API (CORS)
+CORS_ORIGINS=*    # Comma-separated list of allowed origins, or * for all
 ```
 
 > **⚠️ Never commit `.env` to version control.** For production, use GCP Secret Manager (see [DEPLOY.md](DEPLOY.md)).
@@ -373,7 +432,7 @@ SUMMARISE_EVERY=6
 
 - Python 3.11+
 - GCP project with billing enabled
-- APIs enabled: **Vertex AI**, **Firestore**, **Cloud Run**, **Cloud Build**, **Secret Manager**
+- APIs enabled: **Vertex AI**, **Firestore**, **App Engine**, **Cloud Build**, **Secret Manager**
 - Meta Developer account with a **WhatsApp Business App**
 - A **Vertex AI RAG Corpus** created and populated with your knowledge base documents
 - A **Firestore (Native mode)** database created in your GCP project
@@ -431,16 +490,24 @@ See [DEPLOY.md](DEPLOY.md) for the full step-by-step guide covering:
 gcloud app deploy app.yaml --project=ghc-chatbot --quiet
 ```
 
-> **Memory**: 2 GiB is required because the `sentence-transformers` embedding model (`all-MiniLM-L6-v2`) uses ~500 MB at runtime. The model is pre-downloaded during Docker build — no internet download on first request.
+> **Memory**: The app is highly optimized and requires very little memory. A basic F1 or F2 App Engine instance is typically sufficient.
 
 ---
 
 ## Escalation & Rejection Flow
 
-When the bot processes a message, it enforces strict guardrails to prevent hallucinations and spam:
+When the bot processes a message, it enforces strict guardrails to prevent hallucinations, spam, and off-topic content:
 
 ### 1. Out-of-Context Responses (Rejections)
-If the user asks random trivia (e.g. "what are the top 10 schools in India?") or for medical/financial advice, the bot **rejects** the message. It politely states it can only help with GoHappy Club and explicitly **avoids** alerting humans (escalation: false).
+The bot **rejects** messages that are completely unrelated to GoHappy Club. This includes:
+- Random trivia (e.g. "what are the top 10 schools in India?", "how do I fix my car?")
+- Personal biodata or matrimonial/marriage bureau inquiries
+- External news articles, political messages, or forwarded chain messages
+- Unsolicited advertisements
+- Requests for the bot to perform personal tasks (making payments, taking contact details)
+- Medical or financial advice
+
+The bot politely states it can only help with GoHappy Club and explicitly **avoids** alerting humans (escalation: false).
 
 ### 2. Standard Escalations (Missing context or account issues)
 When the query *is* related to GoHappy Club, but the bot cannot answer accurately (e.g. missing policies), or the user asks for a human:
@@ -470,13 +537,15 @@ When the query *is* related to GoHappy Club, but the bot cannot answer accuratel
 6. When resolved, admin sends:
    /resolve <PHONE_NUMBER>
    → Bot resumes handling messages for that user
+   
+   (Auto-Unpause: If 30 minutes pass, the bot will automatically unpause the user when they send their next message).
 ```
 
 ---
 
 ## Admin WhatsApp Commands & Automation
 
-The bot includes an extensive suite of commands exclusively available to the designated `ADMIN_PHONE_NUMBER` via WhatsApp. This allows you to manage the entire knowledge base, handle escalations, and generate insights directly from your phone.
+The bot includes an extensive suite of commands exclusively available to designated admin numbers (either the `ADMIN_PHONE_NUMBER` env var or hardcoded admin numbers) via WhatsApp. This allows you to manage the entire knowledge base, handle escalations, and generate insights directly from your phone.
 
 ### 1. Update Knowledge Base (`/update_kb`)
 Whenever a user asks a question the bot doesn't know, or you launch a new feature/policy, you can update the brain of the chatbot by sending a message:
@@ -500,12 +569,43 @@ When the bot escalates a conversation to a human, it automatically mutes itself 
 *   **Example:** `/resolve 919876543210`
 *   **What Happens:** The bot resumes handling automated messages for that user.
 
+### 5. One-Click Insights-to-KB Update (`POST /insights_update`)
+Automates the full cycle of reading insights → updating the knowledge base → syncing to RAG in a single HTTP call.
+*   **Endpoint:** `POST /insights_update`
+*   **Prerequisites:** You must have run `/insights` at least once to populate the "KB Insights" tab.
+*   **What Happens:**
+    1. Reads the **last row** from the "KB Insights" tab in the Google Audit Sheet
+    2. Feeds the insight text to **Gemini** to surgically update the master Knowledge Base
+    3. Saves the updated KB to Firestore
+    4. **Deletes old files** from the Vertex AI RAG Corpus and **uploads the new KB**
+    5. Returns a success response with the insight and new KB character counts
+
+*   **Example (curl):**
+    ```bash
+    curl -X POST https://your-app.appspot.com/insights_update
+    ```
+
+*   **Response:**
+    ```json
+    {
+      "status": "ok",
+      "message": "Knowledge base updated from latest insights and synced to RAG.",
+      "insight_length": 2456,
+      "new_kb_length": 19830
+    }
+    ```
+
+*   **Error Cases:**
+    - `404` — No insights found (run `/insights` first)
+    - `500` — Gemini update or RAG sync failure
+
 ---
 
 ## Test Suite
 
 | Script | Tests | Purpose |
 |--------|-------|---------|
+| `test_app_chat.py` | 15 | In-app chat API endpoints + /insights_update (POST /api/chat, GET /api/chat/history, POST /insights_update, validation) |
 | `test_rag_cache.py` | 17 | In-memory cache (hit/miss/semantic/TTL/escalation) + message filter (links/emoji/greetings) |
 | `test_cache_pipeline.py` | 18 | End-to-end pipeline: proves RAG + Gemini are SKIPPED on cache HIT |
 | `test_pipeline.py` | — | Pipeline unit tests — simulates webhook payloads locally |
@@ -513,8 +613,13 @@ When the bot escalates a conversation to a human, it automatically mutes itself 
 | `test_bad_queries.py` | — | Tests the query rewriter with broken English, Hinglish, and shortforms |
 | `test_full_simulation.py` | — | Full conversation simulation — multi-turn flows, escalation, dedup, summary compression |
 | `test_send_receive.py` | — | End-to-end test — sends real messages via WhatsApp API |
+| `test_kb_insights.py` | — | KB Insights generation mock test |
+| `test_evaluator.py` | — | Evaluator/grader output parsing and JSON repair tests |
 
 ```bash
+# Run all API tests (chat + insights_update) — no GCP creds needed
+python -m pytest Test/test_app_chat.py -v
+
 # Run cache + filter tests
 python Test/test_rag_cache.py
 
@@ -523,6 +628,9 @@ python Test/test_cache_pipeline.py
 
 # Run the full simulation
 python Test/test_full_simulation.py
+
+# One-shot: sync local KB to Vertex AI RAG corpus (requires GCP auth)
+python Test/sync_kb_to_rag.py
 ```
 
 ---
@@ -537,8 +645,7 @@ python Test/test_full_simulation.py
 | **Knowledge Retrieval** | Vertex AI RAG Engine | SDK 1.71.1 |
 | **Conversation Memory** | Google Cloud Firestore (Native mode) | SDK 2.16.0 |
 | **Messaging** | WhatsApp Business Cloud API (Meta) | Graph API v19.0 |
-| **Semantic Cache** | sentence-transformers + numpy (in-memory) | ≥3.0.0 / ≥1.26.0 |
-| **Embedding Model** | all-MiniLM-L6-v2 (384-dim, Apache 2.0) | — |
+| **Exact Match Cache** | Python Dict (in-memory) | — |
 | **HTTP Client** | httpx (async) | 0.27.0 |
 | **Deployment** | GCP App Engine Standard (F2 Instance) | — |
 | **Secrets** | GCP Secret Manager | — |
@@ -552,7 +659,7 @@ python Test/test_full_simulation.py
 
 2. **Message filtering** — seniors frequently forward Facebook posts, YouTube videos, "Good morning" images, and random links. The filter blocks these at the gate, saving Gemini and RAG tokens.
 
-3. **In-memory semantic cache** — no external Redis or Memorystore needed. The cache runs inside Cloud Run process memory (~2.5 MB for 1,000 entries). On cache HIT, response time drops from 2-4s to <50ms and RAG+Gemini calls are skipped entirely. With `--min-instances 1`, the cache stays warm across requests.
+3. **In-memory semantic cache** — no external Redis or Memorystore needed. The cache runs inside App Engine process memory (~2.5 MB for 1,000 entries). On cache HIT, response time drops from 2-4s to <50ms and RAG+Gemini calls are skipped entirely. With automatic scaling, the cache stays warm across requests.
 
 4. **Query rewriting** — senior users often type in Hinglish, broken English, or shortforms. A lightweight Gemini call polishes the query before RAG retrieval for much better chunk matching.
 
@@ -566,9 +673,13 @@ python Test/test_full_simulation.py
 
 9. **English-only replies** — the bot understands messages in any language (Hindi, Hinglish, Tamil, etc.) but always replies in simple, clear English to maintain consistency.
 
-10. **Pre-downloaded model** — the `all-MiniLM-L6-v2` embedding model (80 MB) is downloaded during Docker build, not at runtime. This eliminates cold-start network downloads.
+
 
 11. **Anti-Hallucination Guardrails** — The prompt explicitly forces the bot to reject unrelated trivia and completely forbids answering medical or financial inquiries.
+
+12. **Name Fabrication Prevention** — The system prompt, evaluator, and quality auditor all explicitly prohibit inventing or assuming customer names. Only names present in the conversation context or customer summary may be used.
+
+13. **Insights-to-KB Automation** — The `/insights_update` endpoint automates the full cycle of analyzing audit insights → applying them to the knowledge base → syncing to Vertex AI RAG, eliminating manual copy-paste steps.
 
 ---
 

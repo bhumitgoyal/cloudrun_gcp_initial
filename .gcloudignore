@@ -15,5 +15,32 @@
 
 # Python pycache:
 __pycache__/
+*.pyc
+
 # Ignored by the build system
 /setup.cfg
+
+# Local development files (not needed on App Engine)
+.env
+.env.*
+.DS_Store
+Dockerfile
+docker-compose.yml
+secrets.json
+
+# Test files (not needed on App Engine)
+Test/
+*.test.py
+*.log
+
+# Documentation (not needed on App Engine)
+README.md
+DEPLOY.md
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+
+# pytest
+.pytest_cache/
