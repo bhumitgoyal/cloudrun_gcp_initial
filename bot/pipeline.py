@@ -266,8 +266,8 @@ class MessagePipeline:
             if last_seen:
                 from datetime import datetime, timezone
                 now = datetime.now(timezone.utc)
-                if (now - last_seen).total_seconds() > 30 * 60:
-                    logger.info("User %s was escalated but 30 mins have passed. Auto-unpausing.", user_id)
+                if (now - last_seen).total_seconds() > 15 * 60:
+                    logger.info("User %s was escalated but 15 mins have passed. Auto-unpausing.", user_id)
                     await self.memory.set_escalation_status(user_id, False)
                     state["escalated_to_human"] = False
                 else:
