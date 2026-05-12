@@ -43,7 +43,55 @@ class ConversationMemory:
             database=db_id,
         )
         self._col = self.db.collection("conversations")
+        self._admin_ref = self.db.collection("config").document("admins")
         logger.info("ConversationMemory connected to Firestore db='%s'", db_id)
+
+    # ── Admin management ─────────────────────────────────────────────────────
+
+    async def get_admin_numbers(self) -> list:
+        """Return the list of dynamically added admin phone numbers from Firestore."""
+        try:
+            snap = await self._admin_ref.get()
+            if snap.exists:
+                return snap.to_dict().get("numbers", [])
+        except Exception as exc:
+            logger.error("Failed to fetch admin numbers: %s", exc)
+        return []
+
+    async def add_admin(self, phone: str) -> bool:
+        """Add a phone number to the dynamic admin list. Returns True if added."""
+        try:
+            snap = await self._admin_ref.get()
+            if snap.exists:
+                current = snap.to_dict().get("numbers", [])
+                if phone in current:
+                    return False  # Already an admin
+                current.append(phone)
+                await self._admin_ref.update({"numbers": current})
+            else:
+                await self._admin_ref.set({"numbers": [phone]})
+            logger.info("Added admin: %s", phone)
+            return True
+        except Exception as exc:
+            logger.error("Failed to add admin %s: %s", phone, exc)
+            return False
+
+    async def remove_admin(self, phone: str) -> bool:
+        """Remove a phone number from the dynamic admin list. Returns True if removed."""
+        try:
+            snap = await self._admin_ref.get()
+            if not snap.exists:
+                return False
+            current = snap.to_dict().get("numbers", [])
+            if phone not in current:
+                return False
+            current.remove(phone)
+            await self._admin_ref.update({"numbers": current})
+            logger.info("Removed admin: %s", phone)
+            return True
+        except Exception as exc:
+            logger.error("Failed to remove admin %s: %s", phone, exc)
+            return False
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 

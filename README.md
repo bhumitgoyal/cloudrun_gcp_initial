@@ -246,15 +246,16 @@ Intercepts after query rewriting, before Vertex AI RAG retrieval. Caches respons
   - **Role & Identity** — GoHappy Club customer support assistant persona
   - **Company Context** — platform overview, direct app download URLs (Apple App Store & Google Play Store), key offerings, support hours
   - **Response Instructions** — HANDLE_GREETING, REJECT (with 10+ explicit categories: biodata, matrimonial, political, chain messages, personal tasks, etc.), ANSWER, ESCALATE
-  - **Tone & Style Rules** — senior-friendly language, no jargon, name fabrication prohibition, app onboarding patience
-  - **Key Policies & Guardrails** — member privacy, session recording access tiers, app onboarding guidance, trip discount coupon rules
+  - **Multi-Question Handling** — when a user asks multiple questions in one message, the bot identifies each question and answers them separately with numbered points; if any part requires escalation, the entire response is flagged
+  - **Tone & Style Rules** — senior-friendly language, language matching, no jargon, name fabrication prohibition, stick-to-query discipline, app onboarding patience
+  - **Key Policies & Guardrails** — member privacy, session recording access tiers, app onboarding guidance, trip discount coupon rules, strict escalation-on-doubt
   - **Strict JSON Output Schema** — `{answer, escalation}` format
 
 - **Query Rewrite Prompt** — 20+ canonical rewrite examples covering memberships, Happy Coins, recordings, referrals, login/OTP, language change, payments, refunds, and greeting+question combos.
 
 - **Output Parsing** — enforces JSON output via Gemini's `response_mime_type="application/json"` and a response schema. Falls back to best-effort text extraction if parsing fails.
 
-- **Language Policy** — the bot always replies in **English only**, regardless of the user's input language.
+- **Language Policy** — the bot **matches the user's language**. If the user writes in English, it replies in English. Hindi → Hindi. Hinglish → Hinglish. This ensures senior members can communicate naturally in their preferred language.
 
 ---
 
@@ -276,7 +277,10 @@ The core orchestration layer. Supports both **WhatsApp** and **In-App** channels
 - **Message Filtering** — blocks links, social media URLs, emoji-only, and greeting-only messages before they consume any Gemini or RAG tokens.
 - **Deduplication** — an in-memory set of the last 500 message IDs prevents duplicate processing.
 - **Admin Override** — the `ADMIN_PHONE_NUMBER` can send `/resolve <PHONE>` to unpause a user (WhatsApp-only).
-- **Escalation** — when Gemini flags `escalation: true`, the bot pauses itself for that user. On WhatsApp, it alerts the admin. On the app, the `escalation` flag is returned in the API response.
+- **Escalation** — when Gemini flags `escalation: true`, the bot pauses itself for that user. On WhatsApp, it alerts the admin. On the app, the `escalation` flag is returned in the API response. **Auto-unpause after 15 minutes** if no admin action is taken.
+- **Multi-Question Handling** — when a user sends a message containing multiple questions, the bot identifies and answers each one individually, escalating if any part is unanswerable.
+- **Language Matching** — the bot replies in the same language the user writes in (English, Hindi, Hinglish, etc.).
+- **Stick-to-Query Guardrail** — the bot only answers what was asked and escalates when it's not 100% confident, rather than guessing or volunteering tangential information.
 - **Background Summary Compression** — compresses recent turns into a rolling summary every N turns (async, doesn't block the reply).
 
 
@@ -538,14 +542,19 @@ When the query *is* related to GoHappy Club, but the bot cannot answer accuratel
    /resolve <PHONE_NUMBER>
    → Bot resumes handling messages for that user
    
-   (Auto-Unpause: If 30 minutes pass, the bot will automatically unpause the user when they send their next message).
+   (Auto-Unpause: If 15 minutes pass, the bot will automatically unpause the user when they send their next message).
 ```
 
 ---
 
 ## Admin WhatsApp Commands & Automation
 
-The bot includes an extensive suite of commands exclusively available to designated admin numbers (either the `ADMIN_PHONE_NUMBER` env var or hardcoded admin numbers) via WhatsApp. This allows you to manage the entire knowledge base, handle escalations, and generate insights directly from your phone.
+The bot includes an extensive suite of commands available to admin numbers via WhatsApp. There are two tiers of admins:
+
+| Tier | Who | Can do |
+|------|-----|--------|
+| **Super Admin** | Hardcoded number (`919818646823`) + `ADMIN_PHONE_NUMBER` env var | All commands, including adding/removing admins |
+| **Dynamic Admin** | Numbers added via `/admin_add` (stored in Firestore `config/admins`) | All commands **except** `/admin_add` and `/admin_remove` |
 
 ### 1. Update Knowledge Base (`/update_kb`)
 Whenever a user asks a question the bot doesn't know, or you launch a new feature/policy, you can update the brain of the chatbot by sending a message:
@@ -569,7 +578,20 @@ When the bot escalates a conversation to a human, it automatically mutes itself 
 *   **Example:** `/resolve 919876543210`
 *   **What Happens:** The bot resumes handling automated messages for that user.
 
-### 5. One-Click Insights-to-KB Update (`POST /insights_update`)
+### 5. Add Admin (`/admin_add`) — Super Admin only
+Grant admin access to another phone number so they can use all bot commands (except admin management).
+*   **Command:** `/admin_add <12-digit number starting with 91>`
+*   **Example:** `/admin_add 919876543210`
+*   **Validation:** The number must be exactly 12 digits and start with `91` (Indian country code).
+*   **What Happens:** The number is added to the dynamic admin list in Firestore (`config/admins` document). They will immediately be able to use all admin commands except `/admin_add` and `/admin_remove`.
+
+### 6. Remove Admin (`/admin_remove`) — Super Admin only
+Revoke admin access from a dynamically added admin.
+*   **Command:** `/admin_remove <12-digit number starting with 91>`
+*   **Example:** `/admin_remove 919876543210`
+*   **What Happens:** The number is removed from Firestore. They will no longer have access to any admin commands. Super admins (hardcoded + env var) cannot be removed.
+
+### 7. One-Click Insights-to-KB Update (`POST /insights_update`)
 Automates the full cycle of reading insights → updating the knowledge base → syncing to RAG in a single HTTP call.
 *   **Endpoint:** `POST /insights_update`
 *   **Prerequisites:** You must have run `/insights` at least once to populate the "KB Insights" tab.
@@ -598,6 +620,7 @@ Automates the full cycle of reading insights → updating the knowledge base →
 *   **Error Cases:**
     - `404` — No insights found (run `/insights` first)
     - `500` — Gemini update or RAG sync failure
+
 
 ---
 
@@ -671,11 +694,11 @@ python Test/sync_kb_to_rag.py
 
 8. **Graceful degradation** — if RAG fails, the bot still answers from its system prompt. If Gemini fails, it returns a polite error with a phone number. If Firestore fails, the error is logged but the webhook still returns 200. If the cache fails, the pipeline runs normally without it.
 
-9. **English-only replies** — the bot understands messages in any language (Hindi, Hinglish, Tamil, etc.) but always replies in simple, clear English to maintain consistency.
+9. **Language-matching replies** — the bot detects the language of each incoming message and replies in the same language (English, Hindi, Hinglish, or other Indian languages). This makes the experience natural for senior members who prefer their native language.
 
+10. **Multi-question decomposition** — when a user packs several questions into one message ("Gold plan ka price kya hai aur mera payment status check karo"), the bot identifies each question, answers what it can from context, and escalates the rest — all within a single reply.
 
-
-11. **Anti-Hallucination Guardrails** — The prompt explicitly forces the bot to reject unrelated trivia and completely forbids answering medical or financial inquiries.
+11. **Anti-Hallucination Guardrails** — The prompt explicitly forces the bot to reject unrelated trivia, forbids answering medical or financial inquiries, and escalates whenever the answer is not 100% supported by retrieved context. The bot sticks strictly to what was asked and never volunteers tangential facts.
 
 12. **Name Fabrication Prevention** — The system prompt, evaluator, and quality auditor all explicitly prohibit inventing or assuming customer names. Only names present in the conversation context or customer summary may be used.
 

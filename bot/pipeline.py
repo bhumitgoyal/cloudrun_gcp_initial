@@ -129,7 +129,15 @@ class MessagePipeline:
         admin_phone = os.environ.get("ADMIN_PHONE_NUMBER")
 
         # 1.5 Admin Override & Insights Logic
-        is_admin = msg.from_number in ("919818646823", "+919818646823") or (admin_phone and msg.from_number == admin_phone)
+        # Super admins: hardcoded + env var (can manage admin list)
+        super_admin_numbers = {"919818646823", "+919818646823"}
+        if admin_phone:
+            super_admin_numbers.add(admin_phone)
+        is_super_admin = msg.from_number in super_admin_numbers
+
+        # Dynamic admins: stored in Firestore (can use all commands except admin management)
+        dynamic_admins = await self.memory.get_admin_numbers()
+        is_admin = is_super_admin or msg.from_number in dynamic_admins
         
         if is_admin:
             if msg.text.strip().lower() == "insights":
@@ -147,6 +155,72 @@ class MessagePipeline:
                     body=f"✅ Resolved escalation for {target_phone}. Bot is back in control.",
                     phone_number_id=msg.phone_number_id
                 )
+            elif msg.text.startswith("/admin_add "):
+                if not is_super_admin:
+                    await self.wa.send_text(
+                        to=msg.from_number,
+                        body="❌ Only super admins can add or remove admins.",
+                        phone_number_id=msg.phone_number_id
+                    )
+                else:
+                    target = msg.text.split(" ")[1].strip().replace("+", "")
+                    import re as _re
+                    if not _re.fullmatch(r"91\d{10}", target):
+                        await self.wa.send_text(
+                            to=msg.from_number,
+                            body="⚠️ Invalid number. Must be a 12-digit number starting with 91.\n\nUsage: `/admin_add 91XXXXXXXXXX`\nExample: `/admin_add 919876543210`",
+                            phone_number_id=msg.phone_number_id
+                        )
+                    else:
+                        added = await self.memory.add_admin(target)
+                        if added:
+                            await self.wa.send_text(
+                                to=msg.from_number,
+                                body=f"✅ {target} has been added as an admin.",
+                                phone_number_id=msg.phone_number_id
+                            )
+                        else:
+                            await self.wa.send_text(
+                                to=msg.from_number,
+                                body=f"ℹ️ {target} is already an admin.",
+                                phone_number_id=msg.phone_number_id
+                            )
+            elif msg.text.startswith("/admin_remove "):
+                if not is_super_admin:
+                    await self.wa.send_text(
+                        to=msg.from_number,
+                        body="❌ Only super admins can add or remove admins.",
+                        phone_number_id=msg.phone_number_id
+                    )
+                else:
+                    target = msg.text.split(" ")[1].strip().replace("+", "")
+                    import re as _re
+                    if not _re.fullmatch(r"91\d{10}", target):
+                        await self.wa.send_text(
+                            to=msg.from_number,
+                            body="⚠️ Invalid number. Must be a 12-digit number starting with 91.\n\nUsage: `/admin_remove 91XXXXXXXXXX`\nExample: `/admin_remove 919876543210`",
+                            phone_number_id=msg.phone_number_id
+                        )
+                    elif target in super_admin_numbers or f"+{target}" in super_admin_numbers:
+                        await self.wa.send_text(
+                            to=msg.from_number,
+                            body="❌ Cannot remove a super admin.",
+                            phone_number_id=msg.phone_number_id
+                        )
+                    else:
+                        removed = await self.memory.remove_admin(target)
+                        if removed:
+                            await self.wa.send_text(
+                                to=msg.from_number,
+                                body=f"✅ {target} has been removed from the admin list.",
+                                phone_number_id=msg.phone_number_id
+                            )
+                        else:
+                            await self.wa.send_text(
+                                to=msg.from_number,
+                                body=f"ℹ️ {target} is not in the admin list.",
+                                phone_number_id=msg.phone_number_id
+                            )
             elif msg.text.startswith("/update_kb"):
                 admin_input = msg.text[len("/update_kb"):].strip()
                 if not admin_input:
@@ -177,17 +251,25 @@ class MessagePipeline:
                 )
                 asyncio.create_task(self._handle_insights_update(msg))
             else:
+                admin_commands = (
+                    "Hello Admin! Here are the available commands:\n\n"
+                    "📝 `/update_kb <instructions>` — Update the Knowledge Base\n"
+                    "✅ `/approve_kb` — Approve & sync KB draft to Vertex AI\n"
+                    "🔓 `/resolve <PHONE>` — Unpause bot for a user\n"
+                    "📊 `insights` — Generate KB improvement insights\n"
+                    "🚀 `/insights_update` — Auto-update KB from latest insights\n"
+                )
+                if is_super_admin:
+                    admin_commands += (
+                        "\n👤 `/admin_add 91XXXXXXXXXX` — Add a new admin\n"
+                        "🚫 `/admin_remove 91XXXXXXXXXX` — Remove an admin\n"
+                    )
+                    if dynamic_admins:
+                        admin_commands += f"\n📋 Current dynamic admins: {', '.join(dynamic_admins)}\n"
+                admin_commands += "\nAny other message from you is ignored by the bot."
                 await self.wa.send_text(
                     to=msg.from_number,
-                    body=(
-                        "Hello Admin! Here are the available commands:\n\n"
-                        "📝 `/update_kb <instructions>` — Update the Knowledge Base\n"
-                        "✅ `/approve_kb` — Approve & sync KB draft to Vertex AI\n"
-                        "🔓 `/resolve <PHONE>` — Unpause bot for a user\n"
-                        "📊 `insights` — Generate KB improvement insights\n"
-                        "🚀 `/insights_update` — Auto-update KB from latest insights\n\n"
-                        "Any other message from you is ignored by the bot."
-                    ),
+                    body=admin_commands,
                     phone_number_id=msg.phone_number_id
                 )
             return
